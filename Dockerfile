@@ -39,6 +39,7 @@ RUN npm ci --omit=dev
 RUN npx prisma generate
 
 COPY --from=builder /app/dist ./dist
+COPY scripts ./scripts
 
 # Non-root user — least-privilege inside the container too. Ownership has
 # to transfer *before* switching: everything above was created as root, and
