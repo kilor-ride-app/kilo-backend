@@ -9,7 +9,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   constructor(config: ConfigService) {
     // REDIS_URL (a full connection string) takes priority — this is what
-    // managed providers like Render hand you. HOST/PORT stays as the local
+    // managed providers like Railway hand you. HOST/PORT stays as the local
     // dev fallback (see docker-compose.yml).
     const url = config.get<string>('REDIS_URL');
     this.client = new Redis({

@@ -45,7 +45,7 @@ import { AuditModule } from './audit/audit.module';
 
     // BullMQ default connection — individual queues registered inside
     // the modules that own them (notifications, reports, wallet settlement).
-    // REDIS_URL (a full connection string, e.g. Render's managed Redis)
+    // REDIS_URL (a full connection string, e.g. Railway's Redis)
     // takes priority; HOST/PORT stays as the local dev fallback.
     BullModule.forRoot({
       connection: process.env.REDIS_URL

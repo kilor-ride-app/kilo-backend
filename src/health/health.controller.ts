@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 
 // Excluded from the /api/v1 prefix in main.ts — a bare, unauthenticated
-// GET /health is what Render (and most platforms) expect to poll.
+// GET /health is what Railway (and most platforms) expect to poll.
 @Controller('health')
 export class HealthController {
   constructor(

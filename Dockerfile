@@ -40,8 +40,14 @@ RUN npx prisma generate
 
 COPY --from=builder /app/dist ./dist
 
-# Non-root user — least-privilege inside the container too
-RUN addgroup -S kilo && adduser -S kilo -G kilo
+# Non-root user — least-privilege inside the container too. Ownership has
+# to transfer *before* switching: everything above was created as root, and
+# `prisma migrate deploy` (run at container start, below) writes into
+# node_modules/@prisma/engines every invocation — confirmed live, this
+# crashed the container outright ("Can't write to
+# /app/node_modules/@prisma/engines ... right permissions") when `kilo`
+# didn't own it yet.
+RUN addgroup -S kilo && adduser -S kilo -G kilo && chown -R kilo:kilo /app
 USER kilo
 
 EXPOSE 3000

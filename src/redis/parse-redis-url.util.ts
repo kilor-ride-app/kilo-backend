@@ -1,6 +1,6 @@
 import { RedisOptions } from 'ioredis';
 
-// Turns a REDIS_URL connection string (redis:// or rediss://, e.g. Render's
+// Turns a REDIS_URL connection string (redis:// or rediss://, e.g. Railway's
 // managed Redis) into a plain ioredis RedisOptions object rather than a
 // live client — BullMQ only auto-sets the required maxRetriesPerRequest:
 // null for Worker/blocking commands when given options, not an already
