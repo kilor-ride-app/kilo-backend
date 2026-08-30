@@ -1,0 +1,1532 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Migrations (and the shadow DB Prisma creates to compute them) need a
+  // direct, session-mode connection — PgBouncer's transaction-pooling mode
+  // can't run CREATE DATABASE or hold the session-level locks migrate needs.
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Core identity — kept minimal here; expand per Task 2/3
+// ─────────────────────────────────────────────────────────────
+
+enum UserRole {
+  RIDER
+  DRIVER
+  BUSINESS_ADMIN
+  BUSINESS_STAFF
+  SUPPORT_AGENT
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+}
+
+model User {
+  id              String     @id @default(uuid())
+  firstName       String
+  lastName        String
+  email           String?    @unique
+  emailVerifiedAt DateTime?
+  // Set while an email change is awaiting confirmation — not unique, since
+  // multiple people can have the same unconfirmed claim outstanding at once
+  // without conflict. Only migrates into `email` once verified.
+  pendingEmail    String?
+  phone           String     @unique
+  passwordHash    String?
+  role            UserRole
+  status          UserStatus @default(PENDING_VERIFICATION)
+  profilePhotoUrl String?
+
+  // Set for BUSINESS_ADMIN/BUSINESS_STAFF accounts only — which company
+  // they act on behalf of. A user belongs to at most one business in this
+  // pass (no multi-tenant membership).
+  businessId String?
+  business   Business? @relation("BusinessMember", fields: [businessId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  otpCodes         OtpCode[]
+  refreshTokens    RefreshToken[]
+  socialIdentities SocialIdentity[]
+
+  // Fine-grained permission layer, on top of the coarse `role` gate above —
+  // only meaningful for ADMIN/SUPPORT_AGENT accounts (finance, logistics,
+  // manager, etc.). SUPER_ADMIN bypasses this check entirely (see
+  // PermissionsGuard) rather than needing every permission assigned.
+  staffRoles Role[]
+
+  sentInvites    StaffInvite[] @relation("InvitedBy")
+  acceptedInvite StaffInvite?  @relation("AcceptedBy")
+
+  ridesAsRider  Ride[]        @relation("RiderRides")
+  ridesAsDriver Ride[]        @relation("DriverRides")
+  rideOffers    RideOffer[]
+  driverStatus  DriverStatus?
+
+  deliveriesAsSender Delivery[]      @relation("DeliverySender")
+  deliveriesAsDriver Delivery[]      @relation("DeliveryDriver")
+  deliveryOffers     DeliveryOffer[] @relation("DeliveryOffers")
+
+  sentBusinessInvites    BusinessTeamInvite[] @relation("BusinessInvitedBy")
+  acceptedBusinessInvite BusinessTeamInvite?  @relation("BusinessAcceptedBy")
+
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
+  deviceTokens            DeviceToken[]
+  kycDocuments            KycDocument[]            @relation("KycDocumentOwner")
+  kycDocumentReviews      KycDocument[]            @relation("KycDocumentReviewer")
+  kycVerifications        KycVerification[]
+
+  guarantors       Guarantor[] @relation("DriverGuarantor")
+  guarantorReviews Guarantor[] @relation("GuarantorReviewer")
+
+  batterySwapReservations BatterySwapReservation[]
+  solarAssessments        SolarAssessment[]
+  assignedSolarLeads      SolarAssessment[]        @relation("SolarLeadAssignee")
+
+  supportTickets        SupportTicket[]        @relation("TicketCreator")
+  assignedTickets       SupportTicket[]        @relation("TicketAssignee")
+  resolvedTickets       SupportTicket[]        @relation("TicketResolver")
+  supportTicketMessages SupportTicketMessage[]
+
+  scheduledReports ScheduledReport[]
+
+  promoRedemptions PromoRedemption[]
+
+  referralCode        ReferralCode?
+  referralsAsReferrer ReferralRedemption[] @relation("Referrer")
+  referralAsReferred  ReferralRedemption?  @relation("Referred")
+  fleetPartnerDriver  FleetPartnerDriver?
+  partnerOfferClaims  PartnerOfferClaim[]
+
+  @@index([role, status])
+  @@map("users")
+}
+
+enum SocialProvider {
+  GOOGLE
+  APPLE
+}
+
+// Rider-only (see AccountsModule) — links a verified Google/Apple identity
+// to a User. Sign-in exchanges a provider ID token for this row; a brand
+// new signup can't be completed until a phone number is supplied and OTP
+// -verified, same invariant as every other account in this system.
+model SocialIdentity {
+  id             String         @id @default(uuid())
+  provider       SocialProvider
+  providerUserId String
+  userId         String
+  user           User           @relation(fields: [userId], references: [id])
+  email          String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("social_identities")
+}
+
+model Role {
+  id          String        @id @default(uuid())
+  // e.g. "finance", "logistics_manager" — free-form so new departments
+  // don't require a code change + migration, unlike the coarse UserRole enum.
+  name        String        @unique
+  description String?
+  permissions Permission[]
+  users       User[]
+  invites     StaffInvite[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid())
+  // e.g. "wallet.commission.edit", "kyc.approve" — checked by
+  // @RequirePermissions(...) on individual endpoints as those domains land.
+  key         String  @unique
+  description String?
+  roles       Role[]
+
+  createdAt DateTime @default(now())
+
+  @@map("permissions")
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+}
+
+model StaffInvite {
+  id    String @id @default(uuid())
+  // The only contact detail needed to send an invite — everything else
+  // (name, phone, password) is collected by the invitee at accept time.
+  email String
+
+  // Fine-grained roles granted on acceptance. There's no coarse-tier field
+  // here — every account created through this flow becomes UserRole.ADMIN;
+  // the Role/Permission layer is what actually scopes what they can do.
+  roles Role[]
+
+  tokenHash  String       @unique
+  status     InviteStatus @default(PENDING)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  acceptedAt DateTime?
+
+  invitedById String
+  invitedBy   User   @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  acceptedUserId String? @unique
+  acceptedUser   User?   @relation("AcceptedBy", fields: [acceptedUserId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+  @@index([email])
+  @@map("staff_invites")
+}
+
+model OtpCode {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  codeHash   String
+  purpose    String // REGISTRATION | LOGIN | PASSWORD_RESET
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, purpose])
+  @@map("otp_codes")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model ServiceArea {
+  id        String   @id @default(uuid())
+  name      String
+  // Store as GeoJSON polygon text for MVP; migrate to native PostGIS
+  // geometry type once the geospatial query patterns are finalized.
+  polygon   Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tariffs    Tariff[]
+  rides      Ride[]
+  deliveries Delivery[]
+
+  @@map("service_areas")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pricing — tariffs (fare formula) and commission rules
+// ─────────────────────────────────────────────────────────────
+
+// serviceAreaId null = fallback/default tariff for that vehicle type,
+// used when no area-specific tariff exists. "At most one ACTIVE tariff per
+// (vehicleType, serviceArea)" is enforced in PricingService, not by a DB
+// constraint — a hard unique constraint would block keeping deactivated
+// history around when a tariff is replaced (DELETE only ever deactivates).
+model Tariff {
+  id            String       @id @default(uuid())
+  // Free-form, not an enum — rides and logistics vehicle classes don't
+  // necessarily share a taxonomy, and new classes shouldn't need a migration.
+  vehicleType   String
+  serviceAreaId String?
+  serviceArea   ServiceArea? @relation(fields: [serviceAreaId], references: [id])
+
+  baseFare        Decimal @db.Decimal(18, 2)
+  perKmRate       Decimal @db.Decimal(18, 2)
+  perMinuteRate   Decimal @db.Decimal(18, 2)
+  minimumFare     Decimal @db.Decimal(18, 2)
+  cancellationFee Decimal @db.Decimal(18, 2)
+  currency        String  @default("NGN")
+  isActive        Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vehicleType, serviceAreaId, isActive])
+  @@map("tariffs")
+}
+
+model CommissionRule {
+  id          String  @id @default(uuid())
+  serviceType String // "RIDE" | "DELIVERY" | "KILOWATT" — free-form, same reasoning as Tariff.vehicleType
+  vehicleType String? // optional further scoping within a serviceType
+  rate        Decimal @db.Decimal(5, 4) // e.g. 0.1800 = 18%
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([serviceType, vehicleType, isActive])
+  @@map("commission_rules")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Kilo Wallet & Ledger Schema
+// Double-entry, append-only. Balances are never mutated directly
+// outside of the atomic conditional UPDATE pattern documented
+// alongside this file — application code should treat Account.balance
+// as derived state, and LedgerEntry rows as the source of truth.
+// ─────────────────────────────────────────────────────────────
+
+enum AccountType {
+  RIDER_WALLET
+  DRIVER_WALLET
+  DRIVER_COMMISSION_PAYABLE // liability: what a driver owes from cash trips
+  BUSINESS_WALLET
+  BUSINESS_CREDIT_PAYABLE // liability: outstanding invoice balance
+  PLATFORM_REVENUE // commission earned
+  PLATFORM_GATEWAY_CLEARING // boundary account for real money in/out via gateway
+  PLATFORM_PROMO_LIABILITY // cost of discounts issued, for financial reporting
+  PLATFORM_REFERRAL_PAYABLE // amounts owed to referrers pending payout
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum TransactionType {
+  WALLET_TOPUP
+  WALLET_WITHDRAWAL
+  RIDE_PAYMENT_WALLET
+  RIDE_PAYMENT_CASH
+  DELIVERY_PAYMENT_WALLET
+  DELIVERY_PAYMENT_CASH
+  BUSINESS_DELIVERY_ACCRUAL // a business-billed delivery completes — owed, not yet invoiced-and-paid
+  COMMISSION_SETTLEMENT // top-up auto-deduction against outstanding commission
+  BUSINESS_INVOICE_PAYMENT
+  REFUND
+  PROMO_REDEMPTION
+  REFERRAL_PAYOUT
+  KILOWATT_PAYMENT // charging/battery-swap payment
+  MANUAL_ADJUSTMENT // admin-initiated correction, always requires a reason + approver
+}
+
+enum TransactionStatus {
+  PENDING // created, awaiting external confirmation (e.g. gateway webhook)
+  COMPLETED // ledger entries posted, balances updated
+  FAILED // did not complete, no ledger entries posted
+  REVERSED // completed, then reversed by a subsequent REFUND/adjustment transaction
+}
+
+model Account {
+  id       String      @id @default(uuid())
+  type     AccountType
+  // Null for platform-level accounts (PLATFORM_REVENUE, PLATFORM_GATEWAY_CLEARING, etc.)
+  // Set for user-owned accounts (rider/driver/business wallets and payables)
+  ownerId  String?
+  currency String      @default("NGN")
+
+  // Materialized balance — always updated via the atomic conditional UPDATE
+  // pattern (see accompanying docs), inside the same DB transaction as the
+  // LedgerEntry rows that justify the change. Never updated independently.
+  balance Decimal @default(0) @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ledgerEntries LedgerEntry[]
+
+  @@unique([ownerId, type]) // one account of a given type per owner
+  @@index([ownerId])
+  @@map("accounts")
+}
+
+model Transaction {
+  id     String            @id @default(uuid())
+  type   TransactionType
+  status TransactionStatus @default(PENDING)
+
+  // External reference — the payment gateway's transaction ID, or an
+  // internally generated reference for wallet-to-wallet movements.
+  // Unique constraint is what stops a duplicate webhook delivery from
+  // ever being processed twice.
+  reference String @unique
+
+  // Client-supplied idempotency key for the API request that initiated
+  // this transaction (top-up, withdrawal, invoice payment). Nullable
+  // because system-initiated transactions (ride payment on trip
+  // completion) don't originate from a client request.
+  idempotencyKey String? @unique
+
+  amount   Decimal @db.Decimal(18, 2)
+  currency String  @default("NGN")
+
+  // Free-form context: rideId, deliveryId, invoiceId, promoCode, etc.
+  // Never store raw card/bank details here.
+  metadata Json?
+
+  // Set only on REFUND-type transactions — points back at what's being reversed.
+  reversesTransactionId String?      @unique
+  reversesTransaction   Transaction? @relation("Reversal", fields: [reversesTransactionId], references: [id])
+  reversedBy            Transaction? @relation("Reversal")
+
+  entries LedgerEntry[]
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([status])
+  @@index([type, createdAt])
+  @@map("transactions")
+}
+
+model LedgerEntry {
+  id            String      @id @default(uuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  direction LedgerDirection
+  amount    Decimal         @db.Decimal(18, 2)
+
+  // Snapshot of the account balance immediately after this entry posted —
+  // redundant with the ledger itself, but makes reconciliation and audit
+  // queries fast without replaying the whole history.
+  balanceAfter Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+// General-purpose idempotency store, used by ANY payment-initiating
+// endpoint (not just wallet ones) — covers the "client retried the
+// request" case ahead of transaction-level processing.
+model IdempotencyKey {
+  key          String   @id
+  requestHash  String // hash of the request body, to detect key reuse with a different payload
+  responseBody Json?
+  statusCode   Int?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime // realistic client retry window, e.g. 24h
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+model WithdrawalRequest {
+  id                String            @id @default(uuid())
+  driverId          String
+  amount            Decimal           @db.Decimal(18, 2) // full amount requested
+  // How much of `amount` was auto-deducted to pay down outstanding cash-ride
+  // commission before anything was sent to the bank — actual bank transfer
+  // was (amount - settledCommission).
+  settledCommission Decimal           @default(0) @db.Decimal(18, 2)
+  status            TransactionStatus @default(PENDING)
+  transactionId     String?           @unique // linked once the withdrawal completes
+  gatewayReference  String?
+  bankAccountId     String // reference to driver's saved payout destination
+  createdAt         DateTime          @default(now())
+  completedAt       DateTime?
+
+  @@index([driverId, status])
+  @@map("withdrawal_requests")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Rides — booking, dispatch, trip lifecycle, cancellation
+// (Phase 2). Driver *location* deliberately isn't a column here —
+// it lives in Redis GEO (plan.md Section 8: the location hot path never
+// touches Postgres synchronously). This table only ever gets a handful of
+// writes per ride (state transitions), never per-location-ping.
+// ─────────────────────────────────────────────────────────────
+
+enum RideStatus {
+  REQUESTED // booked, dispatch not yet started
+  DISPATCHING // actively searching for a driver
+  ACCEPTED // driver accepted, en route to pickup
+  ARRIVED // driver at pickup location
+  IN_PROGRESS // trip started
+  COMPLETED
+  CANCELLED
+  NO_DRIVERS_FOUND // dispatch exhausted every candidate, nobody accepted
+}
+
+enum RidePaymentMethod {
+  WALLET
+  CASH
+}
+
+model Ride {
+  id       String  @id @default(uuid())
+  riderId  String
+  rider    User    @relation("RiderRides", fields: [riderId], references: [id])
+  driverId String?
+  driver   User?   @relation("DriverRides", fields: [driverId], references: [id])
+
+  status        RideStatus        @default(REQUESTED)
+  vehicleType   String
+  paymentMethod RidePaymentMethod @default(WALLET)
+
+  pickupLat      Float
+  pickupLng      Float
+  pickupAddress  String
+  dropoffLat     Float
+  dropoffLng     Float
+  dropoffAddress String
+
+  serviceAreaId String?
+  serviceArea   ServiceArea? @relation(fields: [serviceAreaId], references: [id])
+
+  distanceKm       Decimal? @db.Decimal(10, 2)
+  durationMinutes  Int?
+  estimatedFare    Decimal? @db.Decimal(18, 2)
+  finalFare        Decimal? @db.Decimal(18, 2)
+  commissionAmount Decimal? @db.Decimal(18, 2)
+
+  cancelledById      String?
+  cancellationReason String?
+  cancellationFee    Decimal? @db.Decimal(18, 2)
+
+  // Links to the wallet Transaction once paid — null for CASH rides (no
+  // wallet movement) or while still in progress.
+  transactionId String? @unique
+
+  requestedAt DateTime  @default(now())
+  acceptedAt  DateTime?
+  arrivedAt   DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  offers RideOffer[]
+  rating RideRating?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([riderId, status])
+  @@index([driverId, status])
+  @@index([status])
+  @@map("rides")
+}
+
+enum RideOfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+// One row per (ride, candidate driver) — dispatch fans out offers to
+// nearest drivers in sequence/batches; only ever one row can end up
+// ACCEPTED per ride (enforced in DispatchService via a Redis lock, not a DB
+// constraint, since "first to accept wins" is a cross-request race).
+model RideOffer {
+  id       String @id @default(uuid())
+  rideId   String
+  ride     Ride   @relation(fields: [rideId], references: [id])
+  driverId String
+  driver   User   @relation(fields: [driverId], references: [id])
+
+  status      RideOfferStatus @default(PENDING)
+  expiresAt   DateTime
+  respondedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([rideId, driverId])
+  @@index([rideId, status])
+  @@index([driverId, status])
+  @@map("ride_offers")
+}
+
+model RideRating {
+  id      String  @id @default(uuid())
+  rideId  String  @unique
+  ride    Ride    @relation(fields: [rideId], references: [id])
+  rating  Int // 1-5
+  comment String?
+
+  createdAt DateTime @default(now())
+
+  @@map("ride_ratings")
+}
+
+enum DriverAvailability {
+  OFFLINE
+  ONLINE
+  ON_TRIP
+}
+
+// A driver is in exactly one line of work at a time — set alongside
+// availability via the same POST /drivers/{id}/status endpoint. Dispatch
+// (rides) only ever matches RIDES-mode drivers; LogisticsDispatchService
+// only ever matches LOGISTICS-mode drivers against the same online pool.
+enum DriverServiceMode {
+  RIDES
+  LOGISTICS
+}
+
+// Live position isn't stored here — see the Redis-GEO note above. This
+// tracks the state dispatch actually queries against: is this driver
+// eligible for offers right now, and what do they drive.
+model DriverStatus {
+  userId       String             @id
+  user         User               @relation(fields: [userId], references: [id])
+  availability DriverAvailability @default(OFFLINE)
+  serviceMode  DriverServiceMode  @default(RIDES)
+  vehicleType  String?
+
+  // Count of CASH rides AND cash deliveries completed since
+  // DRIVER_COMMISSION_PAYABLE was last fully cleared
+  // (WalletService.recordCashRideCommission / recordCashDeliveryCommission
+  // both increment it; settleCommission resets it to 0 only on a full
+  // clear) — one shared debt pool and cap across both lines of work, so a
+  // driver can't dodge the cap by switching service mode.
+  unsettledCashRideCount Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@index([availability])
+  @@map("driver_statuses")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────────────────────
+
+enum NotificationChannel {
+  IN_APP
+  PUSH
+  SMS
+  EMAIL
+}
+
+// A campaign fans out into one Notification row per recipient, so history
+// and per-user delivery both come from the same table.
+model NotificationCampaign {
+  id           String    @id @default(uuid())
+  title        String
+  body         String
+  category     String
+  // {"role": "RIDER"} or {"userIds": [...]} — kept loose deliberately;
+  // segment shapes will grow before this needs a schema change.
+  segment      Json
+  scheduledFor DateTime?
+  createdById  String
+  createdAt    DateTime  @default(now())
+  sentAt       DateTime?
+
+  notifications Notification[]
+
+  @@map("notification_campaigns")
+}
+
+model Notification {
+  id       String    @id @default(uuid())
+  userId   String
+  user     User      @relation(fields: [userId], references: [id])
+  category String // free-form — "RIDE", "WALLET", "PROMO", "SYSTEM", ...
+  title    String
+  body     String
+  metadata Json?
+  readAt   DateTime?
+
+  campaignId String?
+  campaign   NotificationCampaign? @relation(fields: [campaignId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt])
+  @@index([campaignId])
+  @@map("notifications")
+}
+
+// One row per (user, category, channel) — absence of a row means "enabled"
+// (opt-out model, not opt-in), so a brand-new category never needs a
+// backfill migration to keep existing users subscribed.
+model NotificationPreference {
+  id       String              @id @default(uuid())
+  userId   String
+  user     User                @relation(fields: [userId], references: [id])
+  category String
+  channel  NotificationChannel
+  enabled  Boolean             @default(true)
+
+  @@unique([userId, category, channel])
+  @@map("notification_preferences")
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  platform  String // "ios" | "android" | "web" — free-form, same reasoning as elsewhere
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("device_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────
+// KYC
+// ─────────────────────────────────────────────────────────────
+
+enum KycDocumentType {
+  LICENSE
+  VEHICLE_REGISTRATION
+  ROADWORTHINESS
+  HACKNEY_PERMIT
+}
+
+enum KycStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// File itself lives in R2 (fileKey only) — plan.md Section 7: KYC docs are
+// served via short-lived signed URLs, never a public bucket, and the
+// object store is never queried directly from outside this module.
+model KycDocument {
+  id              String          @id @default(uuid())
+  driverId        String
+  driver          User            @relation("KycDocumentOwner", fields: [driverId], references: [id])
+  type            KycDocumentType
+  fileKey         String
+  status          KycStatus       @default(PENDING)
+  rejectionReason String?
+  reviewedById    String?
+  reviewedBy      User?           @relation("KycDocumentReviewer", fields: [reviewedById], references: [id])
+  reviewedAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([driverId, type])
+  @@index([status])
+  @@map("kyc_documents")
+}
+
+enum KycVerificationType {
+  FACIAL
+  GOVERNMENT_ID
+}
+
+// Automated checks (Smile Identity), distinct from the manually-reviewed
+// KycDocument uploads above.
+model KycVerification {
+  id                String              @id @default(uuid())
+  driverId          String
+  driver            User                @relation(fields: [driverId], references: [id])
+  type              KycVerificationType
+  provider          String              @default("smile_identity")
+  providerReference String?
+  status            KycStatus           @default(PENDING)
+  rawResult         Json?
+
+  createdAt  DateTime  @default(now())
+  verifiedAt DateTime?
+
+  @@index([driverId, type])
+  @@map("kyc_verifications")
+}
+
+// Not part of the original plan — added on direct request. Mirrors two
+// already-established patterns rather than inventing new ones: the
+// invite-link lifecycle (email/token/accept, see StaffInvite/
+// BusinessTeamInvite) for getting the guarantor to a public, unauthenticated
+// form, and the document-upload-then-admin-review lifecycle (see
+// KycDocument) for what happens once they submit. A driver can have more
+// than one Guarantor row over time — e.g. re-inviting after a REJECTED
+// submission — GuarantorService always reports the most recent one.
+enum GuarantorStatus {
+  INVITED // link sent, guarantor hasn't submitted yet
+  SUBMITTED // guarantor filled the form + uploaded docs, awaiting review
+  VERIFIED
+  REJECTED
+}
+
+model Guarantor {
+  id       String @id @default(uuid())
+  driverId String
+  driver   User   @relation("DriverGuarantor", fields: [driverId], references: [id])
+
+  // Captured from the driver at invite time — just enough to deliver the link.
+  fullName String?
+  email    String?
+  phone    String?
+
+  // Filled by the guarantor themselves, at submission time.
+  relationship      String? // e.g. "Employer", "Family member", "Colleague"
+  address           String?
+  occupation        String?
+  idType            String? // e.g. "NIN", "Voter's Card", "International Passport"
+  idNumber          String?
+  idDocumentKey     String? // R2 key — never a public URL, same as KycDocument
+  proofOfAddressKey String? // R2 key, optional
+
+  status    GuarantorStatus @default(INVITED)
+  tokenHash String          @unique
+  expiresAt DateTime
+
+  submittedAt     DateTime?
+  reviewedById    String?
+  reviewedBy      User?     @relation("GuarantorReviewer", fields: [reviewedById], references: [id])
+  reviewedAt      DateTime?
+  rejectionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([driverId])
+  @@index([status])
+  @@map("guarantors")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Admin ops — platform config + audit log
+// ─────────────────────────────────────────────────────────────
+
+// Simple key-value store for tunables that don't belong to a specific
+// domain module (Pricing already owns tariffs/commissions) — e.g. the
+// cash-ride commission cap, previously a hardcoded constant in
+// DispatchService.
+model PlatformConfig {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_config")
+}
+
+// Deliberately minimal for this pass — covers the admin actions this task
+// introduces (suspend/activate, KYC approve/reject). Broader retroactive
+// coverage across earlier modules (auth, wallet, rides) is a reasonable
+// follow-up, not attempted here.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String // e.g. "user.suspend", "kyc.approve"
+  targetType String // e.g. "User", "KycDocument"
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Logistics (Kilometers) — package/freight booking (Phase 4). Reuses the
+// same driver pool, Redis-GEO location hot path, and wallet ledger as Rides
+// (plan.md Section 6: "Logistics reuses dispatch/trip/wallet infra from
+// rides") — a driver just switches DriverStatus.serviceMode to LOGISTICS to
+// start receiving delivery offers instead of ride offers on the same socket.
+// ─────────────────────────────────────────────────────────────
+
+enum DeliveryStatus {
+  REQUESTED
+  DISPATCHING
+  ACCEPTED
+  PICKED_UP
+  COMPLETED
+  CANCELLED
+  NO_DRIVERS_FOUND
+}
+
+enum DeliveryOfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+enum DeliveryStopStatus {
+  PENDING
+  COMPLETED
+}
+
+enum ProofOfDeliveryType {
+  OTP
+  SIGNATURE
+  PHOTO
+}
+
+model Delivery {
+  id       String  @id @default(uuid())
+  senderId String
+  sender   User    @relation("DeliverySender", fields: [senderId], references: [id])
+  driverId String?
+  driver   User?   @relation("DeliveryDriver", fields: [driverId], references: [id])
+
+  // Set when this delivery was booked through
+  // POST /business/{id}/deliveries/schedule — `senderId` is still the team
+  // member who booked it (for attribution), but payment routes through
+  // WalletService.chargeBusinessForDelivery + an Invoice instead of the
+  // sender's personal wallet/cash.
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id])
+
+  status        DeliveryStatus    @default(REQUESTED)
+  vehicleType   String
+  paymentMethod RidePaymentMethod @default(WALLET)
+
+  pickupLat     Float
+  pickupLng     Float
+  pickupAddress String
+
+  serviceAreaId String?
+  serviceArea   ServiceArea? @relation(fields: [serviceAreaId], references: [id])
+
+  packageDescription String
+  packageValue       Decimal? @db.Decimal(18, 2)
+
+  // Final-stop receiver — used for the tracking SMS and OTP-based proof of
+  // delivery. Intermediate stops (see DeliveryStop) carry their own
+  // address but not their own receiver/OTP — POD is a whole-delivery
+  // concept in this pass, matching the plan's single (not per-stop)
+  // proof-of-delivery endpoint.
+  receiverName  String
+  receiverPhone String
+
+  distanceKm       Decimal? @db.Decimal(10, 2)
+  durationMinutes  Int?
+  estimatedFare    Decimal? @db.Decimal(18, 2)
+  finalFare        Decimal? @db.Decimal(18, 2)
+  commissionAmount Decimal? @db.Decimal(18, 2)
+
+  // Opaque, unguessable — the public GET /track/{trackingToken} and
+  // POST /track/{trackingToken}/otp/verify routes are the only surface
+  // that identifies a delivery to someone with no account at all.
+  trackingToken String @unique
+
+  receiverOtpHash       String?
+  receiverOtpVerifiedAt DateTime?
+
+  podType    ProofOfDeliveryType?
+  podFileKey String? // R2 key for SIGNATURE/PHOTO — never a public URL, same as KycDocument
+
+  cancelledById      String?
+  cancellationReason String?
+  cancellationFee    Decimal? @db.Decimal(18, 2)
+
+  disputeReason       String?
+  disputeResolution   String?
+  disputeResolvedById String?
+  disputeResolvedAt   DateTime?
+
+  // Links to the wallet Transaction once paid — null for CASH deliveries
+  // (no wallet movement) or while still in progress.
+  transactionId String? @unique
+
+  requestedAt DateTime  @default(now())
+  acceptedAt  DateTime?
+  pickedUpAt  DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  stops  DeliveryStop[]
+  offers DeliveryOffer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  Invoice   Invoice?
+
+  @@index([senderId, status])
+  @@index([driverId, status])
+  @@index([status])
+  @@map("deliveries")
+}
+
+// Ordered list of dropoff waypoints for a multi-stop delivery — the
+// pickup itself lives on Delivery, this is purely the destinations.
+model DeliveryStop {
+  id         String   @id @default(uuid())
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id])
+  sequence   Int
+
+  lat     Float
+  lng     Float
+  address String
+
+  status      DeliveryStopStatus @default(PENDING)
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([deliveryId, sequence])
+  @@map("delivery_stops")
+}
+
+// Mirrors RideOffer exactly — one row per (delivery, candidate driver);
+// LogisticsDispatchService is the delivery-side equivalent of DispatchService.
+model DeliveryOffer {
+  id         String   @id @default(uuid())
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id])
+  driverId   String
+  driver     User     @relation("DeliveryOffers", fields: [driverId], references: [id])
+
+  status      DeliveryOfferStatus @default(PENDING)
+  expiresAt   DateTime
+  respondedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([deliveryId, driverId])
+  @@index([deliveryId, status])
+  @@index([driverId, status])
+  @@map("delivery_offers")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Business accounts — corporate customers with team members and
+// invoiced/credit-based billing (Phase 4, Task 16). Deliveries booked
+// through a business are billed on account: the driver is paid once the
+// resulting Invoice is actually paid, not at delivery-completion time —
+// mirrors this codebase's established "never recognize revenue before
+// cash is collected" rule (see WalletService.recordCashRideCommission),
+// just for a business's credit line instead of a driver's cash float.
+// ─────────────────────────────────────────────────────────────
+
+model Business {
+  id                 String  @id @default(uuid())
+  name               String
+  registrationNumber String?
+  contactEmail       String?
+  contactPhone       String?
+
+  // Admin-set ceiling on outstanding (unpaid, accrued) balance —
+  // BUSINESS_CREDIT_PAYABLE.balance is checked against this at booking
+  // time. Only POST /admin/business/{id}/credit-limit can change it.
+  creditLimit Decimal @default(0) @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members    User[]               @relation("BusinessMember")
+  invites    BusinessTeamInvite[]
+  deliveries Delivery[]
+  invoices   Invoice[]
+
+  @@map("businesses")
+}
+
+// Mirrors StaffInvite's shape (email → token → accept, invitee fills in
+// their own name/phone/password) but deliberately kept separate — no
+// Role/Permission grants here, just a coarse BUSINESS_ADMIN/BUSINESS_STAFF
+// choice made at invite time.
+model BusinessTeamInvite {
+  id         String   @id @default(uuid())
+  email      String
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+  // Validated at creation to be BUSINESS_ADMIN or BUSINESS_STAFF only —
+  // no DB-level enum subset in Prisma, so the DTO enforces this.
+  role       UserRole
+
+  tokenHash  String       @unique
+  status     InviteStatus @default(PENDING)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  acceptedAt DateTime?
+
+  invitedById String
+  invitedBy   User   @relation("BusinessInvitedBy", fields: [invitedById], references: [id])
+
+  acceptedUserId String? @unique
+  acceptedUser   User?   @relation("BusinessAcceptedBy", fields: [acceptedUserId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+  @@index([businessId])
+  @@map("business_team_invites")
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  OVERDUE
+}
+
+// One invoice per delivery in this pass, not a periodic consolidated
+// statement — see PROGRESS.md for the deliberate scope note. `amount`/
+// `commissionAmount` are captured here (not re-derived from `delivery` at
+// payment time) so payment logic doesn't depend on the delivery row still
+// reflecting the same figures later.
+model Invoice {
+  id               String        @id @default(uuid())
+  businessId       String
+  business         Business      @relation(fields: [businessId], references: [id])
+  deliveryId       String?       @unique
+  delivery         Delivery?     @relation(fields: [deliveryId], references: [id])
+  amount           Decimal       @db.Decimal(18, 2)
+  commissionAmount Decimal       @db.Decimal(18, 2)
+  description      String
+  status           InvoiceStatus @default(PENDING)
+  dueAt            DateTime
+  paidAt           DateTime?
+  transactionId    String?       @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([businessId, status])
+  @@map("invoices")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Kilowatt (Energy) — charging stations, battery swap, solar leads
+// (Phase 5, Task 17). Charging-station/swap-station search is a small,
+// slow-changing dataset — filtered/distance-sorted in application code
+// (haversine, same technique as everywhere else in this codebase that
+// doesn't warrant PostGIS) rather than a DB geo query.
+// ─────────────────────────────────────────────────────────────
+
+enum ChargingStationStatus {
+  OPERATIONAL
+  MAINTENANCE
+  OFFLINE
+}
+
+model ChargingStation {
+  id             String                @id @default(uuid())
+  name           String
+  address        String
+  lat            Float
+  lng            Float
+  // e.g. ["CCS", "CHAdeMO", "Type2"] — free-form, not an enum, so a new
+  // connector standard doesn't need a migration.
+  chargerTypes   String[]
+  connectorCount Int
+  speedKw        Decimal               @db.Decimal(6, 2)
+  pricePerKwh    Decimal               @db.Decimal(10, 2)
+  status         ChargingStationStatus @default(OPERATIONAL)
+  isActive       Boolean               @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("charging_stations")
+}
+
+enum BatterySwapReservationStatus {
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+model BatterySwapStation {
+  id                 String  @id @default(uuid())
+  name               String
+  address            String
+  lat                Float
+  lng                Float
+  totalSlots         Int
+  availableBatteries Int
+  pricePerSwap       Decimal @db.Decimal(10, 2)
+  isActive           Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reservations BatterySwapReservation[]
+
+  @@index([isActive])
+  @@map("battery_swap_stations")
+}
+
+// Payment happens at reservation time (not a separate confirm step) — the
+// plan's endpoint table has no /confirm or /cancel route, only reserve +
+// get-status, so a reservation is paid-and-confirmed in one action.
+model BatterySwapReservation {
+  id        String             @id @default(uuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id])
+  stationId String
+  station   BatterySwapStation @relation(fields: [stationId], references: [id])
+
+  status        BatterySwapReservationStatus @default(CONFIRMED)
+  amount        Decimal                      @db.Decimal(10, 2)
+  // Links to the wallet Transaction that paid for this swap.
+  transactionId String?                      @unique
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  @@index([userId, status])
+  @@index([stationId, status])
+  @@map("battery_swap_reservations")
+}
+
+enum SolarLeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  CONVERTED
+  CLOSED
+}
+
+model SolarAssessment {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  address             String
+  lat                 Float?
+  lng                 Float?
+  monthlyBillEstimate Decimal? @db.Decimal(10, 2)
+  propertyType        String?
+  notes               String?
+
+  status        SolarLeadStatus @default(NEW)
+  assignedRepId String?
+  assignedRep   User?           @relation("SolarLeadAssignee", fields: [assignedRepId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@map("solar_assessments")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Support — tickets + threaded replies (Phase 5, Task 19)
+// ─────────────────────────────────────────────────────────────
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  ESCALATED
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model SupportTicket {
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation("TicketCreator", fields: [userId], references: [id])
+  subject  String
+  // Free-form: "payment", "ride", "account", etc. — not an enum, so new
+  // categories don't need a migration.
+  category String
+
+  status   TicketStatus   @default(OPEN)
+  priority TicketPriority @default(MEDIUM)
+
+  assignedToId String?
+  assignedTo   User?   @relation("TicketAssignee", fields: [assignedToId], references: [id])
+
+  escalatedAt  DateTime?
+  resolvedAt   DateTime?
+  resolvedById String?
+  resolvedBy   User?     @relation("TicketResolver", fields: [resolvedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages SupportTicketMessage[]
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([assignedToId])
+  @@map("support_tickets")
+}
+
+// The ticket's own `subject` + the first message together are what
+// POST /support/tickets creates in one call — every ticket has at least
+// one message (its own opening description).
+model SupportTicketMessage {
+  id       String        @id @default(uuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id])
+  authorId String
+  author   User          @relation(fields: [authorId], references: [id])
+  body     String
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+  @@map("support_ticket_messages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Reports — recurring scheduled exports (Phase 5, Task 18). The reports
+// themselves are computed live from existing tables (Prisma aggregates),
+// not materialized here — this model only tracks the recurring-delivery
+// subscription, expanded by a BullMQ repeatable job (ReportsProcessor).
+// ─────────────────────────────────────────────────────────────
+
+enum ReportType {
+  RIDERS
+  DRIVERS
+  RIDES
+  LOGISTICS
+  BUSINESS
+  KILOWATT
+  FINANCE
+  SUPPORT
+}
+
+// PDF is intentionally not implemented in this pass — ReportsService
+// rejects it with a clear error rather than faking a render. Kept in the
+// enum (matching the plan's literal "CSV/PDF" wording) so the gap is
+// visible in the API surface, not hidden by omission.
+enum ReportFormat {
+  CSV
+  PDF
+}
+
+enum ScheduleFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+model ScheduledReport {
+  id             String            @id @default(uuid())
+  type           ReportType
+  format         ReportFormat      @default(CSV)
+  frequency      ScheduleFrequency
+  recipientEmail String
+  createdById    String
+  createdBy      User              @relation(fields: [createdById], references: [id])
+  isActive       Boolean           @default(true)
+
+  createdAt DateTime  @default(now())
+  lastRunAt DateTime?
+
+  @@map("scheduled_reports")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Promo codes (Phase 6, Task 20 — built as a fast-follow per the plan's
+// own scope note, not deferred). A discount is applied by reducing
+// estimatedFare *before* it ever reaches WalletService.payForRide/
+// payForDelivery — those methods are completely untouched, so this
+// carries zero risk to already-verified ledger code. Driver commission is
+// computed off the discounted fare, same as it already is off
+// estimatedFare with no promo — the platform's cut scales down
+// proportionally on a promo'd job, it doesn't fully subsidize the driver.
+// `PLATFORM_PROMO_LIABILITY` / `TransactionType.PROMO_REDEMPTION` (scaffolded
+// in Task 2) stay unused in this pass — a "platform fully absorbs the
+// discount, driver payout unaffected" model would need them, but that's a
+// materially bigger ledger change than this pass's scope; PromoRedemption
+// rows here are themselves a complete, queryable discount-cost record.
+// ─────────────────────────────────────────────────────────────
+
+enum PromoType {
+  PERCENTAGE
+  FLAT
+}
+
+enum PromoApplicableService {
+  RIDE
+  DELIVERY
+  KILOWATT
+}
+
+model Promo {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  type        PromoType
+  // Percentage (0-100) or flat NGN amount, depending on `type`.
+  value       Decimal   @db.Decimal(10, 2)
+  // Caps a PERCENTAGE discount's absolute value — ignored for FLAT.
+  maxDiscount Decimal?  @db.Decimal(10, 2)
+
+  usageLimitTotal   Int?
+  usageLimitPerUser Int? @default(1)
+
+  validFrom  DateTime
+  validUntil DateTime
+
+  applicableServices PromoApplicableService[]
+  isActive           Boolean                  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  redemptions PromoRedemption[]
+
+  @@index([code])
+  @@index([isActive])
+  @@map("promos")
+}
+
+// One row per actual applied discount (not per /promos/validate preview —
+// validation alone never creates a row here, only a real booking does).
+model PromoRedemption {
+  id             String                 @id @default(uuid())
+  promoId        String
+  promo          Promo                  @relation(fields: [promoId], references: [id])
+  userId         String
+  user           User                   @relation(fields: [userId], references: [id])
+  service        PromoApplicableService
+  // The Ride/Delivery id (or a Kilowatt reference) this discount applied to.
+  referenceId    String
+  discountAmount Decimal                @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([promoId, userId])
+  @@index([userId])
+  @@map("promo_redemptions")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Partnerships (Phase 6, Task 21) — three distinct partner types:
+// referral/affiliate, fleet partners, third-party partner offers.
+// ─────────────────────────────────────────────────────────────
+
+// One code per user, generated on first request and reused thereafter.
+model ReferralCode {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+  code   String @unique
+
+  createdAt DateTime @default(now())
+
+  redemptions ReferralRedemption[]
+
+  @@map("referral_codes")
+}
+
+enum ReferralRedemptionStatus {
+  // Qualified immediately on redemption in this pass — no "must complete
+  // a first ride" gate, which would need a hook into RidesModule/
+  // LogisticsModule completion logic. A reasonable enhancement, not built
+  // here; PENDING is defined for that future gate but unreachable today.
+  PENDING
+  QUALIFIED
+  PAID
+}
+
+model ReferralRedemption {
+  id             String       @id @default(uuid())
+  referralCodeId String
+  referralCode   ReferralCode @relation(fields: [referralCodeId], references: [id])
+  referrerId     String
+  referrer       User         @relation("Referrer", fields: [referrerId], references: [id])
+  // One redemption per referred user — you can only be referred once.
+  referredUserId String       @unique
+  referredUser   User         @relation("Referred", fields: [referredUserId], references: [id])
+
+  status         ReferralRedemptionStatus @default(QUALIFIED)
+  earningsAmount Decimal                  @db.Decimal(10, 2)
+  qualifiedAt    DateTime                 @default(now())
+  paidAt         DateTime?
+  transactionId  String?                  @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([referrerId, status])
+  @@map("referral_redemptions")
+}
+
+model FleetPartner {
+  id           String  @id @default(uuid())
+  name         String
+  contactEmail String?
+  contactPhone String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  drivers FleetPartnerDriver[]
+
+  @@map("fleet_partners")
+}
+
+// A driver belongs to at most one fleet partner.
+model FleetPartnerDriver {
+  id             String       @id @default(uuid())
+  fleetPartnerId String
+  fleetPartner   FleetPartner @relation(fields: [fleetPartnerId], references: [id])
+  driverId       String       @unique
+  driver         User         @relation(fields: [driverId], references: [id])
+
+  attachedAt DateTime @default(now())
+
+  @@map("fleet_partner_drivers")
+}
+
+enum PartnerOfferAudience {
+  RIDER
+  DRIVER
+  BOTH
+}
+
+model PartnerOffer {
+  id          String               @id @default(uuid())
+  title       String
+  description String
+  partnerName String
+  audience    PartnerOfferAudience @default(BOTH)
+  isActive    Boolean              @default(true)
+  validFrom   DateTime?
+  validUntil  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  claims PartnerOfferClaim[]
+
+  @@map("partner_offers")
+}
+
+model PartnerOfferClaim {
+  id      String       @id @default(uuid())
+  offerId String
+  offer   PartnerOffer @relation(fields: [offerId], references: [id])
+  userId  String
+  user    User         @relation(fields: [userId], references: [id])
+
+  claimedAt DateTime @default(now())
+
+  @@unique([offerId, userId])
+  @@map("partner_offer_claims")
+}

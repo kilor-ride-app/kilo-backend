@@ -1,0 +1,71 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgis/postgis:15-3.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kilo
+      POSTGRES_PASSWORD: kilo_dev_password
+      POSTGRES_DB: kilo
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U kilo']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Transaction-pooling proxy in front of Postgres — see plan.md Section 11.
+  # Even in local dev, developing against the same connection topology as
+  # production catches pooling issues early instead of at load-test time.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://kilo:kilo_dev_password@postgres:5432/kilo
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 20
+    ports:
+      - '6432:5432'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      target: builder
+    command: npm run start:dev
+    environment:
+      DATABASE_URL: postgres://kilo:kilo_dev_password@pgbouncer:5432/kilo
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 3000
+      NODE_ENV: development
+    ports:
+      - '3000:3000'
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - pgbouncer
+      - redis
+
+volumes:
+  postgres_data:

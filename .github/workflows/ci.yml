@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-test-build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:15-3.4-alpine
+        env:
+          POSTGRES_USER: kilo
+          POSTGRES_PASSWORD: kilo_ci_password
+          POSTGRES_DB: kilo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+
+    env:
+      DATABASE_URL: postgres://kilo:kilo_ci_password@localhost:5432/kilo_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Prisma generate
+        run: npm run prisma:generate
+
+      - name: Run migrations against CI database
+        run: npm run prisma:migrate:deploy
+
+      - name: Unit + integration tests
+        run: npm run test:cov
+
+      - name: Build
+        run: npm run build
+
+      # Reconciliation-style ledger integrity check — see plan.md Section 13.
+      # Placeholder step: wire up the actual script once Task 5 (wallet
+      # module) lands so every PR touching money-moving code is checked.
+      - name: Ledger integrity check (placeholder)
+        run: echo "TODO: run ledger balance-sum reconciliation script here once wallet module exists"
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: lint-test-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t kilo-app-backend:${{ github.sha }} .
