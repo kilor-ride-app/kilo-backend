@@ -27,4 +27,8 @@ RUN addgroup -S kilo && adduser -S kilo -G kilo
 USER kilo
 
 EXPOSE 3000
-CMD ["node", "dist/main"]
+
+# Applies any pending migrations before every boot — `migrate deploy` is a
+# safe no-op when there's nothing pending, so this works whether or not the
+# host platform's own pre-deploy-command feature is available/used instead.
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]

@@ -6,6 +6,8 @@ Full architecture, endpoint list, and rationale: see [`kilo-backend-plan.md`](./
 
 Current build status, what's been done task-by-task, and the checklist of credentials still needed before launch: see [`PROGRESS.md`](./PROGRESS.md).
 
+Deploying to Render: see [`DEPLOY.md`](./DEPLOY.md).
+
 ## Stack
 
 - **NestJS** (TypeScript) — modular monolith, one module per domain (`src/<domain>`)

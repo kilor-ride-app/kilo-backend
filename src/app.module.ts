@@ -7,6 +7,8 @@ import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
+import { parseRedisUrl } from './redis/parse-redis-url.util';
+import { HealthModule } from './health/health.module';
 
 import { AccountsModule } from './accounts/accounts.module';
 import { KycModule } from './kyc/kyc.module';
@@ -42,16 +44,21 @@ import { AuditModule } from './audit/audit.module';
     ]),
 
     // BullMQ default connection — individual queues registered inside
-    // the modules that own them (notifications, reports, wallet settlement)
+    // the modules that own them (notifications, reports, wallet settlement).
+    // REDIS_URL (a full connection string, e.g. Render's managed Redis)
+    // takes priority; HOST/PORT stays as the local dev fallback.
     BullModule.forRoot({
-      connection: {
-        host: process.env.REDIS_HOST ?? 'localhost',
-        port: Number(process.env.REDIS_PORT ?? 6379),
-      },
+      connection: process.env.REDIS_URL
+        ? parseRedisUrl(process.env.REDIS_URL)
+        : {
+            host: process.env.REDIS_HOST ?? 'localhost',
+            port: Number(process.env.REDIS_PORT ?? 6379),
+          },
     }),
 
     PrismaModule,
     RedisModule,
+    HealthModule,
 
     // Domain modules — see kilo-backend-plan.md Section 1 for ownership
     AccountsModule,
