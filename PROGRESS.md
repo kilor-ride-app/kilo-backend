@@ -249,6 +249,80 @@ Not present anywhere in `kilo-backend-plan.md`. Requested directly: a driver sen
 - Edge cases: re-inviting a `VERIFIED` driver's guarantor correctly rejected (`409`) → a driver viewing another driver's guarantor correctly rejected (`403`, via the existing `assertSelf` guard) → re-submitting an already-`SUBMITTED`/`VERIFIED` token correctly rejected (`409`) → submitting with no `idDocument` correctly rejected (`400`) → invalid token correctly `404` → inviting with neither email nor phone correctly rejected (`400`) → re-inviting after `REJECTED` confirmed to create a genuinely new row (old row preserved, not overwritten).
 - Every throwaway user, `Guarantor` row, notification, audit log, refresh token, OTP code, and R2 object created during testing was fully deleted afterward.
 
+### Render deployment prep (not in the original plan — built on direct request)
+
+Requested directly: "we want to deploy on render." Rather than just writing docs against the
+existing code, actually made the app deployable — found and fixed three real gaps a production
+deploy would have hit, then wrote `render.yaml` (Blueprint) + `DEPLOY.md` (step-by-step).
+
+- **Redis connection was HOST/PORT-only** (`RedisService`, `BullModule.forRoot()` in
+  `app.module.ts`) — fine for local Docker Compose, but every managed Redis provider (Render's
+  included) hands you a single connection string, not separate host/port. Added
+  `src/redis/parse-redis-url.util.ts` (`REDIS_URL` → a plain `ioredis` options object, handling
+  `rediss://` → TLS and embedded auth) and wired it into both call sites, with HOST/PORT kept as
+  the local-dev fallback. Deliberately parses into an **options object**, not a live client passed
+  straight to BullMQ — confirmed by reading `bullmq`'s own `RedisConnection` source that it only
+  auto-applies the required `maxRetriesPerRequest: null` (needed for Worker blocking commands)
+  when given options, not an already-constructed client; passing a live client would have silently
+  broken every BullMQ worker (`NotificationsProcessor`, `ReportsProcessor`) the first time a real
+  job ran.
+- **No health-check endpoint existed at all** — `main.ts` already excluded `health` from the
+  `/api/v1` prefix (a leftover from the original scaffold), but nothing implemented it. Added
+  `HealthModule`/`HealthController` (`GET /health`) that actually round-trips both dependencies
+  (`SELECT 1` against Postgres, `PING` against Redis) rather than just returning `200` unconditionally
+  — Render's health check gates traffic cutover on this, so a fake-healthy endpoint would let a
+  deploy with a broken DB/Redis connection go live anyway.
+- **`prisma` (the CLI) was a devDependency** — the Dockerfile's production stage runs
+  `npm ci --omit=dev`, so `prisma migrate deploy` wouldn't have been available in the production
+  image to apply migrations on deploy. Moved it to a real dependency.
+- **Dockerfile's `CMD` never ran migrations** — updated to
+  `npx prisma migrate deploy && node dist/main`; `migrate deploy` is a safe no-op with nothing
+  pending, so this works whether or not `render.yaml`'s `preDeployCommand` is honored on the plan
+  in use.
+- **No `.dockerignore` existed** — `docker build` was sending the entire repo (including
+  `node_modules` and `.git`) as build context. Caught live: a local validation build hung for 10+
+  minutes with zero progress output; `docker buildx du` showed real cache growth (build wasn't
+  actually stuck, just glacially slow packaging an uncompressed `node_modules`), and a plain
+  `du -sh node_modules` on this machine's filesystem itself timed out at 120s, confirming the real
+  cause. Added `.dockerignore` mirroring `.gitignore`; the retried build proceeded normally
+  afterward. This would have made every Render build (not just the local validation one) far
+  slower than necessary.
+- **Prisma couldn't detect OpenSSL on the `node:20-alpine` base** — caught live, mid-build:
+  `prisma generate`'s own output warned `Prisma failed to detect the libssl/openssl version to
+  use ... Defaulting to "openssl-1.1.x"`. Alpine ships the `libssl` runtime library but not the
+  `openssl` CLI Prisma's detection script shells out to, so it silently guesses a query-engine
+  binary target instead of reading the image's real OpenSSL 3.x — a guess that could easily be
+  wrong and only surface as a runtime crash later (Prisma unable to load its own query engine),
+  not a build-time failure. Fixed by adding `RUN apk add --no-cache openssl` to both Dockerfile
+  stages (builder and production both run their own `prisma generate`), so detection reads the
+  real version instead of guessing.
+- **Plan tier was a real decision, not a default** — surfaced to the user before writing
+  `render.yaml`: Render's free web-service tier spins down after 15 min idle (would silently break
+  this app's WebSocket-based ride dispatch/tracking and BullMQ background jobs) and free Postgres
+  auto-deletes 30 days after creation. Initially chose paid (Starter-tier: `0.5c-512mb` web /
+  `0.1c-256mb` Postgres / `256mb` Key Value), then **switched to free tier** per a follow-up
+  decision (avoiding the card-on-file requirement for now) — `render.yaml` targets `plan: free`
+  for all three resources, same-region (`oregon`) so the Redis connection stays on Render's
+  private network (no TLS/auth needed internally — confirmed against Render's own docs, not
+  assumed). The free-tier tradeoffs above are documented directly in `render.yaml`'s header
+  comment and `DEPLOY.md`, with the exact one-line change (`plan: free` → a paid tier) needed to
+  upgrade later. One knock-on effect of the free-tier switch: `preDeployCommand` (used to run
+  migrations before traffic cuts over) is a **paid-plan-only** Render feature — confirmed against
+  Render's own docs before it caused a rejected Blueprint creation — so it was removed for the
+  free-tier config; the Dockerfile's own `CMD` already runs `prisma migrate deploy` before booting
+  regardless, so migrations still apply correctly without it.
+- `render.yaml` wires `DATABASE_URL`/`DIRECT_URL` from the Postgres resource and `REDIS_URL` from
+  the Key Value resource automatically (`fromDatabase`/`fromService`); generates fresh
+  `JWT_ACCESS_SECRET`/`JWT_REFRESH_SECRET` via `generateValue: true` (not copied from local dev);
+  every real secret/environment-specific URL (R2, Termii, Resend, FCM, Sentry, Smile Identity,
+  Paystack, `CORS_ORIGINS`, `*_APP_URL`, etc.) is `sync: false` — prompted for once in the Render
+  dashboard during Blueprint creation, never written into the file itself.
+- **Not yet done / can't be done from here**: no Render API access or CLI in this environment, so
+  the actual account creation, GitHub connection, and Blueprint deploy are manual steps documented
+  in `DEPLOY.md` for the user to run themselves. The local Docker build validation (`docker build`
+  against the exact `Dockerfile`/`.dockerignore` that Render will use) was run as a stand-in for a
+  real Render deploy — see the next entry once it finishes.
+
 ---
 
 ## 3. Credentials & external setup checklist

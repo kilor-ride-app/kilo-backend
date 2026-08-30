@@ -4,11 +4,25 @@
 # "New > Blueprint" and point it at the repo. Render reads this file and
 # creates all three resources below in one go.
 #
-# Plans below are Render's cheapest PAID tier for each resource — chosen
-# deliberately over `free`, which spins the web service down after 15 min
-# idle (breaks the WebSocket-based ride dispatch/tracking in this app) and
-# auto-deletes the Postgres database 30 days after creation. Bump the plan
-# values up as real traffic needs it; the field names won't change.
+# Plans are currently set to `free`, by deliberate choice — know the real
+# limitations that come with it before relying on this for anything beyond
+# a demo/smoke-test of the deploy pipeline:
+#   - The web service spins down after 15 min with no inbound traffic, and
+#     takes ~1 min to cold-start on the next request. This app's WebSocket
+#     gateways (live ride-offer dispatch, live tracking) drop any open
+#     connection when that happens, and BullMQ's scheduled/repeatable jobs
+#     (report emails, etc.) simply don't fire while the service is asleep.
+#   - Free Postgres auto-deletes 30 days after creation (14-day grace
+#     period to upgrade before the data is gone for good).
+#   - Free Key Value (Redis) has no data persistence — a restart loses
+#     whatever was queued in BullMQ at that moment.
+# Bump every `plan:` value below to a paid tier (see PROGRESS.md for the
+# ones already tested — `0.5c-512mb` / `0.1c-256mb` / `256mb`) the moment
+# any of that matters. Nothing else in this file needs to change to do that
+# — except also re-adding `preDeployCommand` below, which Render rejects on
+# free plans (paid-only feature) and is omitted here for that reason; the
+# Dockerfile's own CMD already runs `prisma migrate deploy` before booting
+# either way, so migrations still apply correctly without it.
 #
 # Region: everything below is pinned to the same region (oregon) since
 # same-region services talk to each other over Render's private network —
@@ -18,30 +32,25 @@
 
 databases:
   - name: kilo-postgres
-    plan: 0.1c-256mb
+    plan: free
     region: oregon
     postgresMajorVersion: '16'
 
 services:
   - name: kilo-redis
     type: keyvalue
-    plan: 256mb
+    plan: free
     region: oregon
     ipAllowList: [] # empty = no external access; the web service reaches it over the private network
 
   - name: kilo-backend
     type: web
     runtime: docker
-    plan: 0.5c-512mb
+    plan: free
     region: oregon
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # Belt-and-suspenders with the Dockerfile's own CMD (which also runs
-    # `prisma migrate deploy` before starting) — this just makes migrations
-    # run before traffic cuts over, on plans where it's supported. Both are
-    # safe to run back-to-back: migrate deploy is a no-op with nothing pending.
-    preDeployCommand: npx prisma migrate deploy
     envVars:
       - key: NODE_ENV
         value: production

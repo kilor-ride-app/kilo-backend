@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Kilo mobility/logistics/energy platform — backend API",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "nest build",
     "start": "nest start",

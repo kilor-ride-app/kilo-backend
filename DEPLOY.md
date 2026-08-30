@@ -5,11 +5,15 @@ at the repo root defines all three resources (web service, Postgres, Redis) as o
 Render creates and wires them together automatically instead of clicking through three separate
 dashboard flows.
 
-Plans are pinned to the cheapest **paid** tier for each resource (not `free`) — this app's
-WebSocket-based ride dispatch/tracking and BullMQ background jobs need a service that doesn't
-spin down when idle, and a database that doesn't auto-delete after 30 days (both real limitations
-of Render's free tier). See the comment block at the top of `render.yaml` if you want to change
-region or bump plan sizes later.
+Plans are currently set to Render's **free** tier — no card-required cost to try the deploy
+pipeline itself. Know the real tradeoffs that come with that before relying on it for more than a
+demo, though: the web service spins down after 15 min idle (drops any open WebSocket connection —
+this app's live ride-offer dispatch and live tracking — and delays the next request by ~1 min
+while it cold-starts), BullMQ's scheduled/repeatable jobs don't fire while asleep, free Postgres
+auto-deletes 30 days after creation, and free Redis has no data persistence across restarts. The
+comment block at the top of `render.yaml` explains each of these and exactly what to change
+(`plan: free` → a paid tier per resource, plus re-adding `preDeployCommand`) once any of that
+starts to matter.
 
 ---
 
@@ -79,9 +83,11 @@ Render will:
 1. Provision `kilo-postgres` and `kilo-redis`.
 2. Build `kilo-backend` from the `Dockerfile` (multi-stage: installs deps, runs `prisma generate`,
    compiles TypeScript, then builds a lean production image).
-3. Run `npx prisma migrate deploy` (via `preDeployCommand`, and again as a safety net inside the
-   container's own start command) — this applies every migration in `prisma/migrations/`,
-   creating all tables fresh against the new empty database.
+3. Run `npx prisma migrate deploy` as part of the container's own start command (the Dockerfile's
+   `CMD`) — this applies every migration in `prisma/migrations/`, creating all tables fresh
+   against the new empty database. (On a paid plan, `render.yaml` can also run this via
+   `preDeployCommand` instead, before traffic cuts over — free plans don't support that field, so
+   it's left out for now; the Dockerfile's own migration step covers it either way.)
 4. Start the app and poll `GET /health` until it responds `200 {"status":"ok"}` (checks both
    Postgres and Redis are actually reachable, not just that the process is up) before marking the
    deploy live.
