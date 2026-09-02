@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { render } from '@react-email/render';
 import { BusinessTeamInviteEmail } from './templates/business-team-invite-email';
 import { GuarantorInviteEmail } from './templates/guarantor-invite-email';
+import { PasswordResetCodeEmail } from './templates/password-reset-code-email';
 import { StaffInviteEmail } from './templates/staff-invite-email';
 import { VerificationCodeEmail } from './templates/verification-code-email';
 
@@ -25,6 +26,13 @@ export class EmailService {
       <VerificationCodeEmail code={code} expiresInMinutes={expiresInMinutes} />,
     );
     await this.dispatch(to, 'Verify your Kilo email', html);
+  }
+
+  async sendPasswordResetCode(to: string, code: string, expiresInMinutes = 10): Promise<void> {
+    const html = await render(
+      <PasswordResetCodeEmail code={code} expiresInMinutes={expiresInMinutes} />,
+    );
+    await this.dispatch(to, 'Reset your Kilo password', html);
   }
 
   async sendStaffInvite(

@@ -25,7 +25,9 @@
     "seed": "npm run seed:permissions && npm run seed:superadmin && npm run seed:platform-accounts",
     "seed:superadmin": "node scripts/seed-superadmin.js",
     "seed:permissions": "node scripts/seed-permissions.js",
-    "seed:platform-accounts": "node scripts/seed-platform-accounts.js"
+    "seed:platform-accounts": "node scripts/seed-platform-accounts.js",
+    "seed:mock": "node scripts/seed-mock-data.js --yes",
+    "seed:mock:reset": "node scripts/seed-mock-data.js --yes --reset"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1120.0",
@@ -68,6 +70,7 @@
     "uuid": "^10.0.0"
   },
   "devDependencies": {
+    "@faker-js/faker": "^10.6.0",
     "@nestjs/cli": "^10.4.5",
     "@nestjs/testing": "^10.4.0",
     "@types/express": "^4.17.21",

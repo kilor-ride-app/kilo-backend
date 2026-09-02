@@ -9,6 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 import { UserRole, UserStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
+import { EmailService } from '../integrations/email/email.service';
 import { SmsService } from '../integrations/sms/sms.service';
 import { parseDuration } from '../common/utils/duration.util';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
@@ -28,6 +29,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly sms: SmsService,
+    private readonly email: EmailService,
     private readonly otp: OtpService,
     private readonly emailVerification: EmailVerificationService,
   ) {}
@@ -162,6 +164,62 @@ export class AuthService {
     }
 
     return this.issueTokenPair(user.id, user.role, user.phone);
+  }
+
+  private findByIdentifier(identifier: string) {
+    return identifier.includes('@')
+      ? this.prisma.user.findUnique({ where: { email: identifier } })
+      : this.prisma.user.findUnique({ where: { phone: identifier } });
+  }
+
+  async forgotPassword(identifier: string) {
+    const genericMessage = {
+      message: 'If the account exists, a password reset code has been sent',
+    };
+
+    const user = await this.findByIdentifier(identifier);
+    // Silent no-op for unknown accounts and for social-only accounts (no
+    // password to reset) — same response either way, so an attacker can't
+    // use this to enumerate accounts or their sign-in method.
+    if (!user || !user.passwordHash) {
+      return genericMessage;
+    }
+
+    const code = await this.otp.generateAndStore(user.id, OtpPurpose.PASSWORD_RESET);
+    // Prefer email — a reset email costs nothing next to an SMS. Fall back
+    // to SMS only when there's no verified address to send to (phone-only
+    // accounts, or an email that was never confirmed).
+    if (user.email && user.emailVerifiedAt) {
+      await this.email.sendPasswordResetCode(user.email, code);
+    } else {
+      await this.sms.sendOtp(user.phone, code);
+    }
+    return genericMessage;
+  }
+
+  async resetPassword(identifier: string, code: string, newPassword: string) {
+    const user = await this.findByIdentifier(identifier);
+    if (!user) {
+      throw new UnauthorizedException('Invalid code');
+    }
+
+    await this.otp.verify(user.id, OtpPurpose.PASSWORD_RESET, code);
+
+    const passwordHash = await argon2.hash(newPassword);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash },
+      }),
+      // A password reset invalidates every existing session — anyone who
+      // still holds a refresh token for this account is locked out.
+      this.prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    return { message: 'Password has been reset — please log in with your new password' };
   }
 
   async refresh(refreshToken: string): Promise<TokenPair> {
