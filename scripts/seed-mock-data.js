@@ -5,6 +5,11 @@
  * service areas, tariffs, rides, deliveries, wallet ledger, KYC, support,
  * kilowatt, promos, referrals, partnerships, notifications, audit log, ...).
  *
+ * Self-contained: no dependencies beyond @prisma/client + argon2 (both
+ * already in `dependencies`), so it runs in the production/staging
+ * container as-is. Random-but-deterministic — a fixed PRNG seed means every
+ * run generates the same data.
+ *
  * WHERE IT WRITES: whatever DATABASE_URL points at. There is no localhost
  * guard — you pick the target. It refuses to run without --yes so a bare
  * `node scripts/seed-mock-data.js` can't silently write to prod.
@@ -12,6 +17,7 @@
  * Usage:
  *   node scripts/seed-mock-data.js --yes           # clean previous seed rows, then reseed
  *   node scripts/seed-mock-data.js --yes --reset   # only clean previous seed rows
+ *   npm run seed:mock  /  npm run seed:mock:reset
  *
  * RE-RUN SAFETY: every row created here carries a marker —
  *   - users / businesses / invites / staff / fleet / reports:  email or
@@ -34,9 +40,6 @@
 const crypto = require('crypto');
 const { PrismaClient, Prisma } = require('@prisma/client');
 const argon2 = require('argon2');
-const { faker } = require('@faker-js/faker');
-
-faker.seed(20240831);
 
 const N = 20; // baseline rows per table
 const SEED_PASSWORD = 'Passw0rd!seed';
@@ -45,7 +48,56 @@ const SEED_TREASURY_OWNER = 'seed-treasury-account';
 
 const prisma = new PrismaClient();
 
-// ── cleanup (marker-based, child-before-parent) ─────────────────────────
+// ── tiny deterministic data generator (replaces faker) ──────────────────
+let _s = 0x9e3779b9 ^ 20240831;
+function rnd() {
+  // mulberry32
+  _s |= 0;
+  _s = (_s + 0x6d2b79f5) | 0;
+  let t = Math.imul(_s ^ (_s >>> 15), 1 | _s);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const int = (min, max) => Math.floor(rnd() * (max - min + 1)) + min;
+const floatr = (min, max, dp = 2) => Number((rnd() * (max - min) + min).toFixed(dp));
+const one = (arr) => arr[Math.floor(rnd() * arr.length)];
+const someOf = (arr, count) => {
+  const c = [...arr];
+  for (let i = c.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [c[i], c[j]] = [c[j], c[i]];
+  }
+  return c.slice(0, count);
+};
+
+const FIRST = ['Ada', 'Chidi', 'Emeka', 'Ngozi', 'Tunde', 'Bola', 'Yemi', 'Ife', 'Sade', 'Musa', 'Aisha', 'Zainab', 'Ibrahim', 'Fatima', 'Kunle', 'Segun', 'Damola', 'Bisi', 'Uche', 'Obi', 'Nkechi', 'Chioma', 'Femi', 'Rotimi', 'Halima', 'Sani', 'Grace', 'Peter', 'Mary', 'David', 'Sarah', 'Daniel', 'Esther', 'Blessing', 'Victor', 'Joy'];
+const LAST = ['Okafor', 'Adeyemi', 'Balogun', 'Okonkwo', 'Eze', 'Abubakar', 'Bello', 'Ogunleye', 'Nwosu', 'Afolabi', 'Danjuma', 'Chukwu', 'Oladipo', 'Mohammed', 'Ibeh', 'Uzoma', 'Adewale', 'Onyeka', 'Lawal', 'Yakubu', 'Obinna', 'Akande', 'Nwachukwu', 'Salami', 'Ojo'];
+const CITY = ['Ikeja', 'Yaba', 'Surulere', 'Lekki', 'Victoria Island', 'Ajah', 'Ikoyi', 'Maryland', 'Gbagada', 'Apapa', 'Oshodi', 'Mushin', 'Festac', 'Ojota', 'Ketu', 'Agege', 'Isolo', 'Egbeda', 'Ojodu', 'Magodo'];
+const STREET = ['Allen', 'Awolowo', 'Adeniran Ogunsanya', 'Herbert Macaulay', 'Opebi', 'Toyin', 'Admiralty', 'Bourdillon', 'Kudirat Abiola', 'Adeola Odeku', 'Ozumba Mbadiwe', 'Marina', 'Broad', 'Ikorodu', 'Aina', 'Ogunlana'];
+const STREET_SUFFIX = ['Street', 'Road', 'Avenue', 'Close', 'Crescent', 'Way'];
+const CO_PREFIX = ['Sterling', 'Zenith', 'Kobo', 'Swift', 'Andela', 'Flutter', 'Interswitch', 'Konga', 'Naija', 'Bolt', 'GIG', 'Cova', 'Renmo', 'Carbon', 'Kuda', 'Piggy', 'Cowry', 'TeamApt', 'Mono', 'Okra'];
+const CO_SUFFIX = ['Technologies', 'Logistics', 'Ventures', 'Global', 'Solutions', 'Nigeria Ltd', 'Africa', 'Holdings', 'Systems', 'Group'];
+const PRODUCT = ['Documents', 'Laptop', 'Phone accessories', 'Groceries', 'Clothing parcel', 'Auto parts', 'Books', 'Electronics', 'Medical supplies', 'Cosmetics', 'Food items', 'Small furniture', 'Shoes', 'Building materials', 'Art supplies'];
+const JOB = ['Trader', 'Teacher', 'Engineer', 'Accountant', 'Civil servant', 'Business owner', 'Nurse', 'Driver', 'Banker', 'Contractor', 'Consultant', 'Sales representative'];
+const PHRASE = ['Payment not reflecting on my wallet', 'Driver cancelled after accepting', 'App keeps logging me out', 'Delivery arrived later than expected', 'Cannot verify my phone number', 'Wrong fare charged for the trip', 'Need to update my bank details', 'Promo code did not apply', 'Requesting a refund for a failed ride', 'Account suspended without notice', 'Unable to upload KYC documents', 'Charging station was out of service'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const firstName = () => one(FIRST);
+const lastName = () => one(LAST);
+const fullName = () => `${one(FIRST)} ${one(LAST)}`;
+const jobTitle = () => one(JOB);
+const city = () => one(CITY);
+const streetAddress = () => `${int(1, 199)} ${one(STREET)} ${one(STREET_SUFFIX)}`;
+const companyName = () => `${one(CO_PREFIX)} ${one(CO_SUFFIX)}`;
+const productName = () => one(PRODUCT);
+const sentence = (n = 1) => Array.from({ length: n === 1 ? 1 : 1 }, () => one(PHRASE)).join(' ') + '.';
+const paragraph = () => someOf(PHRASE, int(2, 4)).join('. ') + '.';
+const avatarUrl = () => `https://i.pravatar.cc/150?img=${int(1, 70)}`;
+const monthName = () => one(MONTHS);
+const recentDate = (days) => new Date(Date.now() - int(0, days * 86400000));
+const soonDate = (days) => new Date(Date.now() + int(0, days * 86400000));
+
+// ── cleanup (marker-based, child-before-parent) ────────────────────────
 async function cleanup() {
   console.log('Cleaning previous seed data…');
   const seededUsers = await prisma.user.findMany({
@@ -121,14 +173,13 @@ async function cleanup() {
 // ── helpers ─────────────────────────────────────────────────────────────
 const range = (n) => Array.from({ length: n }, (_, i) => i);
 const pick = (arr, i) => arr[i % arr.length];
-const rand = (min, max) => faker.number.int({ min, max });
-const money = (min, max) => faker.number.float({ min, max, fractionDigits: 2 });
+const money = (min, max) => floatr(min, max, 2);
 const tokenHex = () => crypto.randomBytes(32).toString('hex');
 const uuid = () => crypto.randomUUID();
-const lagosLat = () => faker.location.latitude({ min: 6.4, max: 6.65 });
-const lagosLng = () => faker.location.longitude({ min: 3.28, max: 3.55 });
-const soon = (days) => faker.date.soon({ days });
-const past = (days) => faker.date.recent({ days });
+const lagosLat = () => floatr(6.4, 6.65, 5);
+const lagosLng = () => floatr(3.28, 3.55, 5);
+const soon = (days) => soonDate(days);
+const past = (days) => recentDate(days);
 
 const RIDE_VEHICLES = ['ECONOMY', 'COMFORT', 'XL', 'BIKE', 'KEKE'];
 const CARGO_VEHICLES = ['BIKE', 'VAN', 'TRUCK'];
@@ -169,15 +220,15 @@ async function main() {
       out.push(
         await prisma.user.create({
           data: {
-            firstName: faker.person.firstName(),
-            lastName: faker.person.lastName(),
+            firstName: firstName(),
+            lastName: lastName(),
             email: `seed.user.${n}${SD}`,
             emailVerifiedAt: k % 3 === 0 ? past(30) : null,
             phone: `+23481${String(n).padStart(8, '0')}`,
             passwordHash,
             role,
             status,
-            profilePhotoUrl: k % 2 === 0 ? faker.image.avatar() : null,
+            profilePhotoUrl: k % 2 === 0 ? avatarUrl() : null,
           },
         }),
       );
@@ -208,8 +259,8 @@ async function main() {
     businesses.push(
       await prisma.business.create({
         data: {
-          name: `${faker.company.name()} (seed)`,
-          registrationNumber: `RC${rand(100000, 999999)}`,
+          name: `${companyName()} (seed)`,
+          registrationNumber: `RC${int(100000, 999999)}`,
           contactEmail: `seed.biz.${i}${SD}`,
           contactPhone: `+23470${String(i).padStart(8, '0')}`,
           creditLimit: money(50000, 2000000),
@@ -235,7 +286,7 @@ async function main() {
     areas.push(
       await prisma.serviceArea.create({
         data: {
-          name: `[SEED] ${faker.location.city()} Zone ${i + 1}`,
+          name: `[SEED] ${city()} Zone ${i + 1}`,
           polygon: {
             type: 'Polygon',
             coordinates: [
@@ -282,7 +333,7 @@ async function main() {
       data: {
         serviceType: pick(svcTypes, i),
         vehicleType: `SEED-${pick(RIDE_VEHICLES, i)}`,
-        rate: faker.number.float({ min: 0.1, max: 0.25, fractionDigits: 4 }),
+        rate: floatr(0.1, 0.25, 4),
         isActive: i % 7 !== 0,
       },
     });
@@ -317,7 +368,7 @@ async function main() {
         type: pick(kycDocTypes, i),
         fileKey: `seed/kyc/${uuid()}.jpg`,
         status,
-        rejectionReason: status === 'REJECTED' ? faker.lorem.sentence() : null,
+        rejectionReason: status === 'REJECTED' ? sentence() : null,
         reviewedById: status === 'PENDING' ? null : admin.id,
         reviewedAt: status === 'PENDING' ? null : past(20),
       },
@@ -327,9 +378,9 @@ async function main() {
         driverId: drivers[i].id,
         type: i % 2 === 0 ? 'FACIAL' : 'GOVERNMENT_ID',
         provider: 'smile_identity',
-        providerReference: `SID-${rand(100000, 999999)}`,
+        providerReference: `SID-${int(100000, 999999)}`,
         status: pick(kycStatuses, i),
-        rawResult: { score: rand(50, 99), ok: i % 3 !== 0 },
+        rawResult: { score: int(50, 99), ok: i % 3 !== 0 },
         verifiedAt: i % 3 === 0 ? null : past(15),
       },
     });
@@ -346,14 +397,14 @@ async function main() {
     await prisma.guarantor.create({
       data: {
         driverId: drivers[i].id,
-        fullName: faker.person.fullName(),
+        fullName: fullName(),
         email: `seed.guarantor.${i}${SD}`,
         phone: `+23480${String(i).padStart(8, '0')}`,
         relationship: pick(['Employer', 'Family member', 'Colleague'], i),
-        address: submitted ? faker.location.streetAddress() : null,
-        occupation: submitted ? faker.person.jobTitle() : null,
+        address: submitted ? streetAddress() : null,
+        occupation: submitted ? jobTitle() : null,
         idType: submitted ? pick(['NIN', "Voter's Card", 'International Passport'], i) : null,
-        idNumber: submitted ? String(rand(10000000, 99999999)) : null,
+        idNumber: submitted ? String(int(10000000, 99999999)) : null,
         idDocumentKey: submitted ? `seed/guarantor/${uuid()}.jpg` : null,
         status,
         tokenHash: tokenHex(),
@@ -361,7 +412,7 @@ async function main() {
         submittedAt: submitted ? past(10) : null,
         reviewedById: ['VERIFIED', 'REJECTED'].includes(status) ? admin.id : null,
         reviewedAt: ['VERIFIED', 'REJECTED'].includes(status) ? past(5) : null,
-        rejectionReason: status === 'REJECTED' ? faker.lorem.sentence() : null,
+        rejectionReason: status === 'REJECTED' ? sentence() : null,
       },
     });
   }
@@ -440,18 +491,18 @@ async function main() {
           paymentMethod: i % 3 === 0 ? 'CASH' : 'WALLET',
           pickupLat: lagosLat(),
           pickupLng: lagosLng(),
-          pickupAddress: faker.location.streetAddress(),
+          pickupAddress: streetAddress(),
           dropoffLat: lagosLat(),
           dropoffLng: lagosLng(),
-          dropoffAddress: faker.location.streetAddress(),
+          dropoffAddress: streetAddress(),
           serviceAreaId: pick(areas, i).id,
           distanceKm: money(1, 25),
-          durationMinutes: rand(5, 60),
+          durationMinutes: int(5, 60),
           estimatedFare: fare,
           finalFare: completed ? fare : null,
           commissionAmount: completed ? commission : null,
           cancelledById: status === 'CANCELLED' ? pick(riders, i).id : null,
-          cancellationReason: status === 'CANCELLED' ? faker.lorem.sentence() : null,
+          cancellationReason: status === 'CANCELLED' ? sentence() : null,
           cancellationFee: status === 'CANCELLED' ? money(200, 600) : null,
           requestedAt: past(30),
           acceptedAt: completed ? past(29) : null,
@@ -477,8 +528,8 @@ async function main() {
     await prisma.rideRating.create({
       data: {
         rideId: rides[i].id,
-        rating: rand(3, 5),
-        comment: i % 2 === 0 ? faker.lorem.sentence() : null,
+        rating: int(3, 5),
+        comment: i % 2 === 0 ? sentence() : null,
       },
     });
   }
@@ -506,14 +557,14 @@ async function main() {
           paymentMethod: businessBilled ? 'WALLET' : i % 3 === 0 ? 'CASH' : 'WALLET',
           pickupLat: lagosLat(),
           pickupLng: lagosLng(),
-          pickupAddress: faker.location.streetAddress(),
+          pickupAddress: streetAddress(),
           serviceAreaId: pick(areas, i).id,
-          packageDescription: faker.commerce.productName(),
+          packageDescription: productName(),
           packageValue: money(2000, 150000),
-          receiverName: faker.person.fullName(),
+          receiverName: fullName(),
           receiverPhone: `+23478${String(i).padStart(8, '0')}`,
           distanceKm: money(1, 30),
-          durationMinutes: rand(10, 90),
+          durationMinutes: int(10, 90),
           estimatedFare: fare,
           finalFare: completed ? fare : null,
           commissionAmount: completed ? commission : null,
@@ -539,7 +590,7 @@ async function main() {
         sequence: 1,
         lat: lagosLat(),
         lng: lagosLng(),
-        address: faker.location.streetAddress(),
+        address: streetAddress(),
         status: 'COMPLETED',
         completedAt: past(28),
       },
@@ -570,7 +621,7 @@ async function main() {
         deliveryId: linked ? deliveries[i].id : null,
         amount,
         commissionAmount: Number((amount * 0.18).toFixed(2)),
-        description: `Delivery services — ${faker.date.month()} batch ${i + 1}`,
+        description: `Delivery services — ${monthName()} batch ${i + 1}`,
         status,
         dueAt: soon(30),
         paidAt: status === 'PAID' ? past(5) : null,
@@ -661,7 +712,7 @@ async function main() {
         settledCommission: i % 3 === 0 ? money(500, 3000) : 0,
         status: pick(['PENDING', 'COMPLETED', 'FAILED'], i),
         bankAccountId: `seed-bank-${uuid()}`,
-        gatewayReference: i % 2 === 0 ? `PSK-${rand(100000, 999999)}` : null,
+        gatewayReference: i % 2 === 0 ? `PSK-${int(100000, 999999)}` : null,
         completedAt: i % 3 === 1 ? past(4) : null,
       },
     });
@@ -679,7 +730,7 @@ async function main() {
     const t = await prisma.supportTicket.create({
       data: {
         userId: creator.id,
-        subject: faker.lorem.sentence(4),
+        subject: one(PHRASE),
         category: pick(ticketCats, i),
         status,
         priority: pick(['LOW', 'MEDIUM', 'HIGH', 'URGENT'], i),
@@ -690,12 +741,12 @@ async function main() {
       },
     });
     await prisma.supportTicketMessage.create({
-      data: { ticketId: t.id, authorId: creator.id, body: faker.lorem.paragraph() },
+      data: { ticketId: t.id, authorId: creator.id, body: paragraph() },
     });
     ticketMsgCount++;
     if (status !== 'OPEN') {
       await prisma.supportTicketMessage.create({
-        data: { ticketId: t.id, authorId: admin.id, body: faker.lorem.paragraph() },
+        data: { ticketId: t.id, authorId: admin.id, body: paragraph() },
       });
       ticketMsgCount++;
     }
@@ -709,12 +760,12 @@ async function main() {
   for (const i of range(N)) {
     await prisma.chargingStation.create({
       data: {
-        name: `[SEED] ${faker.company.name()} Charging Hub`,
-        address: faker.location.streetAddress(true),
+        name: `[SEED] ${companyName()} Charging Hub`,
+        address: streetAddress(),
         lat: lagosLat(),
         lng: lagosLng(),
-        chargerTypes: faker.helpers.arrayElements(['CCS', 'CHAdeMO', 'Type2', 'GB/T'], rand(1, 3)),
-        connectorCount: rand(2, 12),
+        chargerTypes: someOf(['CCS', 'CHAdeMO', 'Type2', 'GB/T'], int(1, 3)),
+        connectorCount: int(2, 12),
         speedKw: money(7, 150),
         pricePerKwh: money(80, 300),
         status: pick(['OPERATIONAL', 'MAINTENANCE', 'OFFLINE'], i),
@@ -724,12 +775,12 @@ async function main() {
     swapStations.push(
       await prisma.batterySwapStation.create({
         data: {
-          name: `[SEED] ${faker.location.city()} Swap Point`,
-          address: faker.location.streetAddress(true),
+          name: `[SEED] ${city()} Swap Point`,
+          address: streetAddress(),
           lat: lagosLat(),
           lng: lagosLng(),
-          totalSlots: rand(6, 24),
-          availableBatteries: rand(0, 6),
+          totalSlots: int(6, 24),
+          availableBatteries: int(0, 6),
           pricePerSwap: money(500, 2500),
           isActive: i % 5 !== 0,
         },
@@ -759,12 +810,12 @@ async function main() {
     await prisma.solarAssessment.create({
       data: {
         userId: pick(allUsers, i).id,
-        address: faker.location.streetAddress(true),
+        address: streetAddress(),
         lat: lagosLat(),
         lng: lagosLng(),
         monthlyBillEstimate: money(15000, 250000),
         propertyType: pick(['Residential', 'Commercial', 'Industrial'], i),
-        notes: i % 2 === 0 ? faker.lorem.sentence() : null,
+        notes: i % 2 === 0 ? sentence() : null,
         status: pick(['NEW', 'CONTACTED', 'QUALIFIED', 'CONVERTED', 'CLOSED'], i),
         assignedRepId: i % 2 === 0 ? admin.id : null,
       },
@@ -782,13 +833,13 @@ async function main() {
         data: {
           code: `SEED${String(i).padStart(2, '0')}`,
           type,
-          value: type === 'PERCENTAGE' ? rand(5, 40) : money(200, 2000),
+          value: type === 'PERCENTAGE' ? int(5, 40) : money(200, 2000),
           maxDiscount: type === 'PERCENTAGE' ? money(500, 3000) : null,
-          usageLimitTotal: i % 3 === 0 ? rand(100, 1000) : null,
+          usageLimitTotal: i % 3 === 0 ? int(100, 1000) : null,
           usageLimitPerUser: 1,
           validFrom: past(30),
           validUntil: soon(60),
-          applicableServices: faker.helpers.arrayElements(['RIDE', 'DELIVERY', 'KILOWATT'], rand(1, 3)),
+          applicableServices: someOf(['RIDE', 'DELIVERY', 'KILOWATT'], int(1, 3)),
           isActive: i % 8 !== 0,
         },
       }),
@@ -843,7 +894,7 @@ async function main() {
     fleetPartners.push(
       await prisma.fleetPartner.create({
         data: {
-          name: `${faker.company.name()} Fleet (seed)`,
+          name: `${companyName()} Fleet (seed)`,
           contactEmail: `seed.fleet.${i}${SD}`,
           contactPhone: `+23471${String(i).padStart(8, '0')}`,
         },
@@ -866,9 +917,9 @@ async function main() {
     partnerOffers.push(
       await prisma.partnerOffer.create({
         data: {
-          title: faker.commerce.productName(),
-          description: faker.lorem.sentence(),
-          partnerName: `${faker.company.name()} (seed)`,
+          title: `${productName()} discount`,
+          description: sentence(),
+          partnerName: `${companyName()} (seed)`,
           audience: pick(['RIDER', 'DRIVER', 'BOTH'], i),
           isActive: i % 7 !== 0,
           validFrom: past(20),
@@ -893,8 +944,8 @@ async function main() {
     campaigns.push(
       await prisma.notificationCampaign.create({
         data: {
-          title: `[SEED] ${faker.lorem.sentence(4)}`,
-          body: faker.lorem.sentence(),
+          title: `[SEED] ${one(PHRASE)}`,
+          body: sentence(),
           category: pick(['PROMO', 'SYSTEM', 'RIDE', 'WALLET'], i),
           segment: i % 2 === 0 ? { role: 'RIDER' } : { userIds: [riders[0].id, riders[1].id] },
           scheduledFor: i % 3 === 0 ? soon(7) : null,
@@ -911,8 +962,8 @@ async function main() {
       data: {
         userId: pick(allUsers, i).id,
         category: pick(['RIDE', 'WALLET', 'PROMO', 'SYSTEM'], i),
-        title: faker.lorem.sentence(4),
-        body: faker.lorem.sentence(),
+        title: one(PHRASE),
+        body: sentence(),
         metadata: { seed: true },
         readAt: i % 2 === 0 ? past(3) : null,
         campaignId: i < N ? campaigns[i].id : null,
@@ -939,7 +990,7 @@ async function main() {
         action,
         targetType,
         targetId: pick(allUsers, i).id,
-        metadata: { note: faker.lorem.sentence(), seed: true },
+        metadata: { note: sentence(), seed: true },
         createdAt: past(25),
       },
     });
