@@ -4,10 +4,11 @@ import { PlatformConfigModule } from '../platform-config/platform-config.module'
 import { WalletModule } from '../wallet/wallet.module';
 import { AdminOpsController } from './admin-ops.controller';
 import { AdminOpsService } from './admin-ops.service';
+import { AnalyticsService } from './analytics.service';
 
 @Module({
   imports: [WalletModule, PlatformConfigModule, AuditModule],
   controllers: [AdminOpsController],
-  providers: [AdminOpsService],
+  providers: [AdminOpsService, AnalyticsService],
 })
 export class AdminOpsModule {}

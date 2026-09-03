@@ -2,8 +2,10 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { NotificationChannel, Prisma, UserRole } from '@prisma/client';
 import { Queue } from 'bullmq';
+import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { FcmService } from '../integrations/fcm/fcm.service';
+import { ListNotificationHistoryQueryDto } from './dto/list-notification-history-query.dto';
 
 export interface NotificationSegment {
   role?: UserRole;
@@ -145,13 +147,33 @@ export class NotificationsService {
     return this.createCampaign(createdById, title, body, category, segment, scheduledFor);
   }
 
-  async history(take = 50, skip = 0) {
-    return this.prisma.notificationCampaign.findMany({
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-      include: { _count: { select: { notifications: true } } },
-    });
+  async history(query: ListNotificationHistoryQueryDto) {
+    const createdAt =
+      query.from || query.to
+        ? {
+            ...(query.from ? { gte: new Date(query.from) } : {}),
+            ...(query.to ? { lte: new Date(query.to) } : {}),
+          }
+        : undefined;
+
+    const where: Prisma.NotificationCampaignWhereInput = {
+      ...(query.category ? { category: query.category } : {}),
+      ...(query.campaignId ? { id: query.campaignId } : {}),
+      ...(createdAt ? { createdAt } : {}),
+    };
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.notificationCampaign.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: query.take ?? 50,
+        skip: query.skip ?? 0,
+        include: { _count: { select: { notifications: true } } },
+      }),
+      this.prisma.notificationCampaign.count({ where }),
+    ]);
+
+    return toPaginated(data, total, query);
   }
 
   private async createCampaign(

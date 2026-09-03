@@ -11,8 +11,10 @@ import { ConfigService } from '@nestjs/config';
 import { EmailService } from '../integrations/email/email.service';
 import { AuthService, TokenPair } from '../accounts/auth.service';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
+import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
+import { ListBusinessesQueryDto } from './dto/list-businesses-query.dto';
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -200,8 +202,107 @@ export class BusinessService {
     return this.prisma.business.update({ where: { id: businessId }, data: { creditLimit } });
   }
 
-  async listAllBusinesses(take = 50, skip = 0) {
-    return this.prisma.business.findMany({ orderBy: { createdAt: 'desc' }, take, skip });
+  async listAllBusinesses(query: ListBusinessesQueryDto) {
+    const where: Prisma.BusinessWhereInput = query.search
+      ? {
+          OR: [
+            { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+            { contactEmail: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+          ],
+        }
+      : {};
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.business.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: query.take ?? 50,
+        skip: query.skip ?? 0,
+        include: { _count: { select: { members: true, deliveries: true, invoices: true } } },
+      }),
+      this.prisma.business.count({ where }),
+    ]);
+
+    const ids = rows.map((r) => r.id);
+    const payables = ids.length
+      ? await this.prisma.account.findMany({
+          where: { type: AccountType.BUSINESS_CREDIT_PAYABLE, ownerId: { in: ids } },
+          select: { ownerId: true, balance: true },
+        })
+      : [];
+    const outstandingById = new Map(payables.map((p) => [p.ownerId, p.balance]));
+
+    return toPaginated(
+      rows.map((r) => ({ ...r, outstanding: outstandingById.get(r.id) ?? new Prisma.Decimal(0) })),
+      total,
+      query,
+    );
+  }
+
+  // Metric cards for the Business Management screen. Business has no status
+  // column, so "active" = has at least one team member.
+  async businessStats() {
+    const [totalAccounts, activeAccounts, onCredit, outstanding] = await Promise.all([
+      this.prisma.business.count(),
+      this.prisma.business.count({ where: { members: { some: {} } } }),
+      this.prisma.business.count({ where: { creditLimit: { gt: 0 } } }),
+      this.prisma.account.aggregate({
+        where: { type: AccountType.BUSINESS_CREDIT_PAYABLE },
+        _sum: { balance: true },
+      }),
+    ]);
+
+    return {
+      totalAccounts,
+      activeAccounts,
+      onCredit,
+      totalOutstanding: outstanding._sum.balance ?? new Prisma.Decimal(0),
+    };
+  }
+
+  async getBusinessDetail(id: string) {
+    const business = await this.prisma.business.findUnique({
+      where: { id },
+      include: { _count: { select: { members: true, deliveries: true } } },
+    });
+    if (!business) {
+      throw new NotFoundException('Business not found');
+    }
+
+    const [invoiceSummary, payable, recentDeliveries] = await Promise.all([
+      this.prisma.invoice.groupBy({
+        by: ['status'],
+        where: { businessId: id },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      this.wallet.getOrCreateUserAccount(id, AccountType.BUSINESS_CREDIT_PAYABLE),
+      this.prisma.delivery.findMany({
+        where: { businessId: id },
+        orderBy: { requestedAt: 'desc' },
+        take: 10,
+        select: {
+          id: true,
+          status: true,
+          pickupAddress: true,
+          receiverName: true,
+          finalFare: true,
+          requestedAt: true,
+          completedAt: true,
+        },
+      }),
+    ]);
+
+    return {
+      ...business,
+      outstanding: payable.balance,
+      invoices: invoiceSummary.map((i) => ({
+        status: i.status,
+        count: i._count,
+        amount: i._sum.amount ?? new Prisma.Decimal(0),
+      })),
+      recentDeliveries,
+    };
   }
 
   async assertWithinCreditLimit(businessId: string, additionalAmount: Prisma.Decimal) {

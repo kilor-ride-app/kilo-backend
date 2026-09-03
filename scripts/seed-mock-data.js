@@ -652,7 +652,8 @@ async function main() {
   }
   note('account', 1 + N * 2);
 
-  async function postTx(type, reference, amount, entries) {
+  async function postTx(type, reference, amount, entries, when) {
+    const at = when || past(20);
     const tx = await prisma.transaction.create({
       data: {
         type,
@@ -660,7 +661,8 @@ async function main() {
         reference,
         amount: new Prisma.Decimal(amount),
         currency: 'NGN',
-        completedAt: past(20),
+        createdAt: at,
+        completedAt: at,
       },
     });
     for (const e of entries) {
@@ -700,6 +702,172 @@ async function main() {
       { accountId: driverWallets[i].id, direction: 'CREDIT', amount: driverAmount },
       { accountId: treasury.id, direction: 'CREDIT', amount: commission },
     ]);
+  }
+
+  // ── Analytics history (time-series spread for the dashboard charts) ───
+  // Everything above clusters ~20-30 days ago. The Platform Analytics,
+  // top-up-trend and revenue-by-service endpoints need data spread across a
+  // full year — plus a little in the last 24h — so every range filter
+  // (day / 7days / month / 6months / year) renders something.
+  console.log('Seeding analytics history…');
+
+  const DAY = 86400000;
+  const HIST_DAYS = 400; // > 13 months, covers the "year" range
+  const at = (msAgo) => new Date(Date.now() - msAgo);
+
+  // Ramp signups: spread the seeded riders'/drivers' createdAt across the
+  // window so the "user growth" series climbs instead of spiking to full
+  // count in the current bucket. (createdAt has no @updatedAt, so it's a
+  // plain settable field.)
+  const rampUsers = [...riders, ...drivers];
+  for (let i = 0; i < rampUsers.length; i++) {
+    const daysAgo = Math.round(((rampUsers.length - i) / rampUsers.length) * (HIST_DAYS - 20)) + int(0, 20);
+    await prisma.user.update({
+      where: { id: rampUsers[i].id },
+      data: { createdAt: at(daysAgo * DAY) },
+    });
+  }
+
+  // Bulk historical rides + deliveries (no ledger — analytics only reads
+  // requestedAt / completedAt / status / commissionAmount).
+  const histRides = [];
+  const histDeliveries = [];
+  for (let day = HIST_DAYS; day >= 1; day--) {
+    const recent = day <= 30; // denser in the last month for daily buckets
+    if (!recent && rnd() > 0.4) continue;
+    const dayBase = Date.now() - day * DAY;
+    const stamp = () => new Date(dayBase + int(0, 23) * 3600000 + int(0, 59) * 60000);
+
+    for (let k = 0, n = recent ? int(2, 5) : int(1, 3); k < n; k++) {
+      const requestedAt = stamp();
+      const done = rnd() < 0.82;
+      const fare = money(1200, 9000);
+      histRides.push({
+        riderId: pick(riders, int(0, N - 1)).id,
+        driverId: pick(drivers, int(0, N - 1)).id,
+        status: done ? 'COMPLETED' : one(['DISPATCHING', 'ACCEPTED', 'IN_PROGRESS', 'CANCELLED']),
+        vehicleType: pick(RIDE_VEHICLES, int(0, RIDE_VEHICLES.length - 1)),
+        paymentMethod: rnd() < 0.3 ? 'CASH' : 'WALLET',
+        pickupLat: lagosLat(), pickupLng: lagosLng(), pickupAddress: streetAddress(),
+        dropoffLat: lagosLat(), dropoffLng: lagosLng(), dropoffAddress: streetAddress(),
+        serviceAreaId: pick(areas, int(0, N - 1)).id,
+        distanceKm: money(1, 25),
+        durationMinutes: int(5, 60),
+        estimatedFare: fare,
+        finalFare: done ? fare : null,
+        commissionAmount: done ? Number((fare * 0.18).toFixed(2)) : null,
+        requestedAt,
+        acceptedAt: new Date(requestedAt.getTime() + int(1, 5) * 60000),
+        completedAt: done ? new Date(requestedAt.getTime() + int(10, 55) * 60000) : null,
+      });
+    }
+
+    for (let k = 0, n = recent ? int(1, 4) : int(0, 2); k < n; k++) {
+      const requestedAt = stamp();
+      const done = rnd() < 0.82;
+      const fare = money(1500, 12000);
+      histDeliveries.push({
+        senderId: pick(riders, int(0, N - 1)).id,
+        driverId: pick(drivers, int(0, N - 1)).id,
+        status: done ? 'COMPLETED' : one(['DISPATCHING', 'ACCEPTED', 'PICKED_UP', 'CANCELLED']),
+        vehicleType: pick(CARGO_VEHICLES, int(0, CARGO_VEHICLES.length - 1)),
+        paymentMethod: rnd() < 0.3 ? 'CASH' : 'WALLET',
+        pickupLat: lagosLat(), pickupLng: lagosLng(), pickupAddress: streetAddress(),
+        serviceAreaId: pick(areas, int(0, N - 1)).id,
+        packageDescription: productName(),
+        packageValue: money(2000, 150000),
+        receiverName: fullName(),
+        receiverPhone: `+23478${String(int(0, 99999999)).padStart(8, '0')}`,
+        distanceKm: money(1, 30),
+        durationMinutes: int(10, 90),
+        estimatedFare: fare,
+        finalFare: done ? fare : null,
+        commissionAmount: done ? Number((fare * 0.18).toFixed(2)) : null,
+        trackingToken: `seed-trk-${uuid()}`,
+        // a few unresolved disputes for the "needs attention" / disputed card
+        disputeReason: done && rnd() < 0.05 ? sentence() : null,
+        requestedAt,
+        acceptedAt: new Date(requestedAt.getTime() + int(1, 5) * 60000),
+        completedAt: done ? new Date(requestedAt.getTime() + int(20, 80) * 60000) : null,
+      });
+    }
+  }
+
+  // A handful in the last 24h so the "day" (hourly) range isn't empty.
+  for (const h of [1, 2, 4, 6, 9, 11, 13, 15, 17, 19, 21, 23]) {
+    const when = at(h * 3600000 - int(0, 55) * 60000);
+    const done = when.getTime() < Date.now() - 3600000 && rnd() < 0.6;
+    const fare = money(1200, 9000);
+    histRides.push({
+      riderId: pick(riders, int(0, N - 1)).id,
+      driverId: pick(drivers, int(0, N - 1)).id,
+      status: done ? 'COMPLETED' : one(['DISPATCHING', 'ACCEPTED', 'IN_PROGRESS']),
+      vehicleType: pick(RIDE_VEHICLES, int(0, RIDE_VEHICLES.length - 1)),
+      paymentMethod: rnd() < 0.3 ? 'CASH' : 'WALLET',
+      pickupLat: lagosLat(), pickupLng: lagosLng(), pickupAddress: streetAddress(),
+      dropoffLat: lagosLat(), dropoffLng: lagosLng(), dropoffAddress: streetAddress(),
+      serviceAreaId: pick(areas, int(0, N - 1)).id,
+      distanceKm: money(1, 25),
+      durationMinutes: int(5, 60),
+      estimatedFare: fare,
+      finalFare: done ? fare : null,
+      commissionAmount: done ? Number((fare * 0.18).toFixed(2)) : null,
+      requestedAt: when,
+      acceptedAt: new Date(when.getTime() + int(1, 5) * 60000),
+      completedAt: done ? new Date(when.getTime() + int(10, 50) * 60000) : null,
+    });
+  }
+
+  await prisma.ride.createMany({ data: histRides });
+  await prisma.delivery.createMany({ data: histDeliveries });
+  note('ride', histRides.length);
+  note('delivery', histDeliveries.length);
+
+  // Historical top-ups (top-up-trend chart) and Kilowatt payments
+  // (revenue-by-service) — kept ledger-consistent via postTx.
+  for (let k = 0; k < 110; k++) {
+    const when = at(int(1, HIST_DAYS) * DAY - int(0, 23) * 3600000);
+    const amount = new Prisma.Decimal(money(5000, 90000));
+    const rw = pick(riderWallets, int(0, N - 1));
+    await postTx(
+      'WALLET_TOPUP',
+      `seed:histtopup:${k}`,
+      amount,
+      [
+        { accountId: treasury.id, direction: 'DEBIT', amount },
+        { accountId: rw.id, direction: 'CREDIT', amount },
+      ],
+      when,
+    );
+  }
+  for (const h of [3, 7, 12, 16, 20]) {
+    const amount = new Prisma.Decimal(money(4000, 30000));
+    const rw = pick(riderWallets, int(0, N - 1));
+    await postTx(
+      'WALLET_TOPUP',
+      `seed:histtopup:today:${h}`,
+      amount,
+      [
+        { accountId: treasury.id, direction: 'DEBIT', amount },
+        { accountId: rw.id, direction: 'CREDIT', amount },
+      ],
+      at(h * 3600000),
+    );
+  }
+  for (let k = 0; k < 45; k++) {
+    const when = at(int(1, HIST_DAYS) * DAY);
+    const amount = new Prisma.Decimal(money(800, 6000));
+    const rw = pick(riderWallets, int(0, N - 1));
+    await postTx(
+      'KILOWATT_PAYMENT',
+      `seed:histkw:${k}`,
+      amount,
+      [
+        { accountId: rw.id, direction: 'DEBIT', amount },
+        { accountId: treasury.id, direction: 'CREDIT', amount },
+      ],
+      when,
+    );
   }
 
   // ── Withdrawal requests ──────────────────────────────────────────────

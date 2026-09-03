@@ -16,8 +16,8 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../common/guards/permissions.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
-import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { BusinessService } from './business.service';
+import { ListBusinessesQueryDto } from './dto/list-businesses-query.dto';
 import { SetCreditLimitDto } from './dto/set-credit-limit.dto';
 
 @ApiTags('business')
@@ -30,8 +30,18 @@ export class AdminBusinessController {
   constructor(private readonly business: BusinessService) {}
 
   @Get()
-  listAll(@Query() query: PaginationDto) {
-    return this.business.listAllBusinesses(query.take, query.skip);
+  listAll(@Query() query: ListBusinessesQueryDto) {
+    return this.business.listAllBusinesses(query);
+  }
+
+  @Get('stats')
+  stats() {
+    return this.business.businessStats();
+  }
+
+  @Get(':id')
+  detail(@Param('id') id: string) {
+    return this.business.getBusinessDetail(id);
   }
 
   @HttpCode(HttpStatus.OK)

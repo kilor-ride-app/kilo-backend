@@ -17,8 +17,8 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../common/guards/permissions.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
-import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { BroadcastDto } from './dto/broadcast.dto';
+import { ListNotificationHistoryQueryDto } from './dto/list-notification-history-query.dto';
 import { ScheduleNotificationDto } from './dto/schedule-notification.dto';
 import { TargetedDto } from './dto/targeted.dto';
 import { NotificationsService } from './notifications.service';
@@ -58,7 +58,7 @@ export class AdminNotificationsController {
   }
 
   @Get('history')
-  history(@Query() query: PaginationDto) {
-    return this.notifications.history(query.take, query.skip);
+  history(@Query() query: ListNotificationHistoryQueryDto) {
+    return this.notifications.history(query);
   }
 }

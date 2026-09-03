@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsOptional, IsString } from 'class-validator';
+import { UserStatus } from '@prisma/client';
+import { IsEnum, IsOptional, IsString } from 'class-validator';
 import { PaginationDto } from '../../wallet/dto/pagination.dto';
 
 export class ListUsersQueryDto extends PaginationDto {
@@ -7,4 +8,9 @@ export class ListUsersQueryDto extends PaginationDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @ApiProperty({ enum: UserStatus, required: false })
+  @IsOptional()
+  @IsEnum(UserStatus)
+  status?: UserStatus;
 }

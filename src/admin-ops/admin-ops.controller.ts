@@ -18,9 +18,13 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../common/guards/permissions.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { AnalyticsRangeDto } from '../common/dto/analytics-range.dto';
 import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
 import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { AdminOpsService } from './admin-ops.service';
+import { AnalyticsService } from './analytics.service';
+import { ListAuditQueryDto } from './dto/list-audit-query.dto';
+import { ListDriversQueryDto } from './dto/list-drivers-query.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { SuspendUserDto } from './dto/suspend-user.dto';
 
@@ -30,12 +34,27 @@ import { SuspendUserDto } from './dto/suspend-user.dto';
 @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 @Controller('admin')
 export class AdminOpsController {
-  constructor(private readonly adminOps: AdminOpsService) {}
+  constructor(
+    private readonly adminOps: AdminOpsService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   @RequirePermissions('admin.dashboard.view')
   @Get('dashboard/summary')
   getDashboardSummary() {
     return this.adminOps.getDashboardSummary();
+  }
+
+  @RequirePermissions('admin.dashboard.view')
+  @Get('dashboard/analytics')
+  getAnalytics(@Query() query: AnalyticsRangeDto) {
+    return this.analytics.platformAnalytics(query.range);
+  }
+
+  @RequirePermissions('admin.dashboard.view')
+  @Get('dashboard/needs-attention')
+  getNeedsAttention() {
+    return this.adminOps.getNeedsAttention();
   }
 
   @RequirePermissions('admin.dashboard.view')
@@ -47,13 +66,31 @@ export class AdminOpsController {
   @RequirePermissions('admin.users.manage')
   @Get('riders')
   listRiders(@Query() query: ListUsersQueryDto) {
-    return this.adminOps.listRiders(query.search, query.take ?? 50, query.skip ?? 0);
+    return this.adminOps.listRiders(query);
   }
 
   @RequirePermissions('admin.users.manage')
   @Get('riders/:id')
   getRiderDetail(@Param('id') id: string) {
     return this.adminOps.getRiderDetail(id);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('riders/:id/rides')
+  getRiderRides(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getRiderRides(id, query.take ?? 50, query.skip ?? 0);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('riders/:id/deliveries')
+  getRiderDeliveries(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getRiderDeliveries(id, query.take ?? 50, query.skip ?? 0);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('riders/:id/transactions')
+  getRiderTransactions(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getUserTransactions(id, query.take ?? 50, query.skip ?? 0);
   }
 
   @RequirePermissions('admin.users.manage')
@@ -76,14 +113,38 @@ export class AdminOpsController {
 
   @RequirePermissions('admin.users.manage')
   @Get('drivers')
-  listDrivers(@Query() query: ListUsersQueryDto) {
-    return this.adminOps.listDrivers(query.search, query.take ?? 50, query.skip ?? 0);
+  listDrivers(@Query() query: ListDriversQueryDto) {
+    return this.adminOps.listDrivers(query);
   }
 
   @RequirePermissions('admin.users.manage')
   @Get('drivers/:id')
   getDriverDetail(@Param('id') id: string) {
     return this.adminOps.getDriverDetail(id);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('drivers/:id/rides')
+  getDriverRides(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getDriverRides(id, query.take ?? 50, query.skip ?? 0);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('drivers/:id/deliveries')
+  getDriverDeliveries(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getDriverDeliveries(id, query.take ?? 50, query.skip ?? 0);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('drivers/:id/transactions')
+  getDriverTransactions(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getUserTransactions(id, query.take ?? 50, query.skip ?? 0);
+  }
+
+  @RequirePermissions('admin.users.manage')
+  @Get('drivers/:id/withdrawals')
+  getDriverWithdrawals(@Param('id') id: string, @Query() query: PaginationDto) {
+    return this.adminOps.getDriverWithdrawals(id, query.take ?? 50, query.skip ?? 0);
   }
 
   @RequirePermissions('admin.users.manage')
@@ -122,7 +183,7 @@ export class AdminOpsController {
 
   @RequirePermissions('admin.audit.view')
   @Get('audit-logs')
-  getAuditLogs(@Query() query: PaginationDto) {
-    return this.adminOps.getAuditLogs(query.take ?? 50, query.skip ?? 0);
+  getAuditLogs(@Query() query: ListAuditQueryDto) {
+    return this.adminOps.getAuditLogs(query);
   }
 }

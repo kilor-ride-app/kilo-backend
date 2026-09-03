@@ -8,6 +8,7 @@ import { PromoModule } from '../promo/promo.module';
 import { ServiceAreasModule } from '../service-areas/service-areas.module';
 import { WalletModule } from '../wallet/wallet.module';
 import { AdminRidesController } from './admin-rides.controller';
+import { AdminRidesService } from './admin-rides.service';
 import { CancellationService } from './cancellation.service';
 import { DispatchController } from './dispatch.controller';
 import { DispatchService } from './dispatch.service';
@@ -43,6 +44,7 @@ import { TripService } from './trip.service';
     DispatchService,
     TripService,
     CancellationService,
+    AdminRidesService,
     DriverOffersGateway,
     RideTrackingGateway,
   ],
