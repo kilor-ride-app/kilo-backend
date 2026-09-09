@@ -4,9 +4,35 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { BatterySwapStation, BatterySwapStationStatus } from '@prisma/client';
 import { haversineDistanceKm } from '../common/utils/haversine.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
+
+// Admin dashboard payload — accepts the doc's field names.
+interface AdminBatterySwapStationInput {
+  name: string;
+  location: string;
+  latitude: number;
+  longitude: number;
+  totalBays: number;
+  availableBays: number;
+  status?: BatterySwapStationStatus;
+  pricePerSwap?: number;
+  isActive?: boolean;
+}
+
+// Storage columns → dashboard-facing shape.
+export function toSwapStationView(s: BatterySwapStation) {
+  return {
+    ...s,
+    location: s.address,
+    latitude: s.lat,
+    longitude: s.lng,
+    totalBays: s.totalSlots,
+    availableBays: s.availableBatteries,
+  };
+}
 
 // Heuristic only — this codebase doesn't track a real queue, so "wait
 // time" is a flat estimate based on whether the station currently has any
@@ -96,38 +122,57 @@ export class BatterySwapService {
   // creatable/manageable somehow, and only charging stations got explicit
   // admin CRUD there. Mirrors ChargingStationsService's shape exactly.
   async listAllStations() {
-    return this.prisma.batterySwapStation.findMany({ orderBy: { createdAt: 'desc' } });
+    const stations = await this.prisma.batterySwapStation.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+    return stations.map(toSwapStationView);
   }
 
-  async createStation(dto: {
-    name: string;
-    address: string;
-    lat: number;
-    lng: number;
-    totalSlots: number;
-    availableBatteries: number;
-    pricePerSwap: number;
-  }) {
-    return this.prisma.batterySwapStation.create({ data: dto });
+  async createStation(dto: AdminBatterySwapStationInput) {
+    const station = await this.prisma.batterySwapStation.create({
+      data: {
+        name: dto.name,
+        address: dto.location,
+        lat: dto.latitude,
+        lng: dto.longitude,
+        totalSlots: dto.totalBays,
+        availableBatteries: dto.availableBays,
+        pricePerSwap: dto.pricePerSwap ?? 0,
+        status: dto.status ?? BatterySwapStationStatus.AVAILABLE,
+      },
+    });
+    return toSwapStationView(station);
   }
 
-  async updateStation(
-    id: string,
-    dto: Partial<{
-      name: string;
-      address: string;
-      lat: number;
-      lng: number;
-      totalSlots: number;
-      availableBatteries: number;
-      pricePerSwap: number;
-      isActive: boolean;
-    }>,
-  ) {
-    const station = await this.prisma.batterySwapStation.findUnique({ where: { id } });
-    if (!station) {
+  async updateStation(id: string, dto: Partial<AdminBatterySwapStationInput>) {
+    const existing = await this.prisma.batterySwapStation.findUnique({ where: { id } });
+    if (!existing) {
       throw new NotFoundException('Battery swap station not found');
     }
-    return this.prisma.batterySwapStation.update({ where: { id }, data: dto });
+    const station = await this.prisma.batterySwapStation.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.location !== undefined ? { address: dto.location } : {}),
+        ...(dto.latitude !== undefined ? { lat: dto.latitude } : {}),
+        ...(dto.longitude !== undefined ? { lng: dto.longitude } : {}),
+        ...(dto.totalBays !== undefined ? { totalSlots: dto.totalBays } : {}),
+        ...(dto.availableBays !== undefined ? { availableBatteries: dto.availableBays } : {}),
+        ...(dto.pricePerSwap !== undefined ? { pricePerSwap: dto.pricePerSwap } : {}),
+        ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+      },
+    });
+    return toSwapStationView(station);
+  }
+
+  // Soft delete — a station may be referenced by past reservations.
+  async deleteStation(id: string) {
+    const existing = await this.prisma.batterySwapStation.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('Battery swap station not found');
+    }
+    await this.prisma.batterySwapStation.update({ where: { id }, data: { isActive: false } });
+    return { deleted: true };
   }
 }

@@ -5,16 +5,25 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AccountType, InviteStatus, Prisma, UserRole, UserStatus } from '@prisma/client';
+import {
+  AccountType,
+  BusinessStatus,
+  InvoiceStatus,
+  InviteStatus,
+  Prisma,
+  UserRole,
+  UserStatus,
+} from '@prisma/client';
 import * as argon2 from 'argon2';
 import { ConfigService } from '@nestjs/config';
+import { AuditService } from '../audit/audit.service';
 import { EmailService } from '../integrations/email/email.service';
 import { AuthService, TokenPair } from '../accounts/auth.service';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
 import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
-import { ListBusinessesQueryDto } from './dto/list-businesses-query.dto';
+import { CreditStatus, ListBusinessesQueryDto } from './dto/list-businesses-query.dto';
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -26,6 +35,7 @@ export class BusinessService {
     private readonly config: ConfigService,
     private readonly email: EmailService,
     private readonly authService: AuthService,
+    private readonly audit: AuditService,
   ) {}
 
   // Any RIDER can start a company account — a one-way upgrade, same
@@ -202,15 +212,45 @@ export class BusinessService {
     return this.prisma.business.update({ where: { id: businessId }, data: { creditLimit } });
   }
 
+  async setStatus(businessId: string, status: BusinessStatus, actorId: string) {
+    await this.prisma.business.findUniqueOrThrow({ where: { id: businessId } });
+    const updated = await this.prisma.business.update({
+      where: { id: businessId },
+      data: { status },
+    });
+    await this.audit.record(actorId, 'business.status.update', 'Business', businessId, { status });
+    return updated;
+  }
+
   async listAllBusinesses(query: ListBusinessesQueryDto) {
-    const where: Prisma.BusinessWhereInput = query.search
-      ? {
-          OR: [
-            { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
-            { contactEmail: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
-          ],
-        }
-      : {};
+    const where: Prisma.BusinessWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.search
+        ? {
+            OR: [
+              { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+              { contactEmail: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+            ],
+          }
+        : {}),
+    };
+
+    // creditStatus is derived (not a column) so it can't be a Prisma filter —
+    // when set, pull the full matching set, annotate, then filter + paginate
+    // in app code. Without it, keep the cheap DB-side pagination.
+    if (query.creditStatus) {
+      const rows = await this.prisma.business.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        include: { _count: { select: { members: true, deliveries: true, invoices: true } } },
+      });
+      const annotated = (await this.annotateCredit(rows)).filter(
+        (r) => r.creditStatus === query.creditStatus,
+      );
+      const skip = query.skip ?? 0;
+      const take = query.take ?? 50;
+      return toPaginated(annotated.slice(skip, skip + take), annotated.length, query);
+    }
 
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.business.findMany({
@@ -223,20 +263,44 @@ export class BusinessService {
       this.prisma.business.count({ where }),
     ]);
 
-    const ids = rows.map((r) => r.id);
-    const payables = ids.length
-      ? await this.prisma.account.findMany({
-          where: { type: AccountType.BUSINESS_CREDIT_PAYABLE, ownerId: { in: ids } },
-          select: { ownerId: true, balance: true },
-        })
-      : [];
-    const outstandingById = new Map(payables.map((p) => [p.ownerId, p.balance]));
+    return toPaginated(await this.annotateCredit(rows), total, query);
+  }
 
-    return toPaginated(
-      rows.map((r) => ({ ...r, outstanding: outstandingById.get(r.id) ?? new Prisma.Decimal(0) })),
-      total,
-      query,
-    );
+  // Adds `outstanding` (BUSINESS_CREDIT_PAYABLE balance) and a derived
+  // `creditStatus` to each business row.
+  private async annotateCredit<T extends { id: string }>(rows: T[]) {
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) {
+      return rows.map((r) => ({
+        ...r,
+        outstanding: new Prisma.Decimal(0),
+        creditStatus: 'NO_CREDIT' as CreditStatus,
+      }));
+    }
+
+    const [payables, overdueGroups] = await Promise.all([
+      this.prisma.account.findMany({
+        where: { type: AccountType.BUSINESS_CREDIT_PAYABLE, ownerId: { in: ids } },
+        select: { ownerId: true, balance: true },
+      }),
+      this.prisma.invoice.groupBy({
+        by: ['businessId'],
+        where: { businessId: { in: ids }, status: InvoiceStatus.OVERDUE },
+        _count: true,
+      }),
+    ]);
+    const outstandingById = new Map(payables.map((p) => [p.ownerId, p.balance]));
+    const overdueIds = new Set(overdueGroups.map((g) => g.businessId));
+
+    return rows.map((r) => {
+      const outstanding = outstandingById.get(r.id) ?? new Prisma.Decimal(0);
+      const creditStatus: CreditStatus = overdueIds.has(r.id)
+        ? 'OVERDUE'
+        : outstanding.greaterThan(0)
+          ? 'ON_CREDIT'
+          : 'NO_CREDIT';
+      return { ...r, outstanding, creditStatus };
+    });
   }
 
   // Metric cards for the Business Management screen. Business has no status

@@ -90,7 +90,8 @@ new ones).
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Same values as local `.env` — live-verified this session |
 | `TERMII_API_KEY` | Same value as local `.env` — live-verified this session (note: see `PROGRESS.md` for an open sender-ID delivery gap) |
 | `RESEND_API_KEY` | Same value as local `.env` |
-| `EMAIL_FROM` | A verified-domain address (see resend.com/domains) — until this is set, email sending stays limited to Resend's sandbox restrictions, same as local dev |
+| `EMAIL_FROM` | A verified-domain address (see resend.com/domains) — until this is set, email sending stays limited to Resend's sandbox restrictions, same as local dev. **Staff invites specifically**: with an unverified sender the invite email fails, and the API now returns `503` + rolls the invite row back (so the admin can retry); `POST /admin/staff/invites/:id/resend` also exists. Verify the sender domain (SPF/DKIM/DMARC in Resend) to make invites deliver. |
+| `R2_PUBLIC_BASE_URL` | Optional. Public bucket URL or CDN domain for the R2 bucket — when set, uploaded admin avatars are stored as stable public URLs; otherwise a 7-day signed URL is used as a fallback |
 | `FCM_SERVICE_ACCOUNT_JSON` | The **minified, single-line** JSON from local `.env` — paste it exactly as one line (this bit us once already this session when it was pasted pretty-printed across multiple lines in a `.env` file; keep it single-line here too) |
 | `SENTRY_DSN` | Same value as local `.env` — wired up and live-verified this session |
 | `SMILE_IDENTITY_PARTNER_ID`, `SMILE_IDENTITY_API_KEY` | Leave blank unless you have real Smile Identity sandbox/production credentials — facial/government-ID verification returns a clean `503` until set |

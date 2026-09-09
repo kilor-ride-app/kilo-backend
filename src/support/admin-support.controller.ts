@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -22,6 +23,7 @@ import { AssignTicketDto } from './dto/assign-ticket.dto';
 import { EscalateTicketDto } from './dto/escalate-ticket.dto';
 import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { ResolveTicketDto } from './dto/resolve-ticket.dto';
+import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { SupportService } from './support.service';
 
 @ApiTags('support')
@@ -40,6 +42,15 @@ export class AdminSupportController {
       query.take,
       query.skip,
     );
+  }
+
+  @Patch(':id')
+  update(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateTicketDto,
+  ) {
+    return this.support.adminUpdate(id, user.userId, dto);
   }
 
   @HttpCode(HttpStatus.OK)

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -13,6 +14,8 @@ import { EmailService } from '../integrations/email/email.service';
 import { SmsService } from '../integrations/sms/sms.service';
 import { parseDuration } from '../common/utils/duration.util';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
+import { describeUserAgent } from '../common/utils/user-agent.util';
+import { RequestContext } from '../common/types/jwt-payload.interface';
 import { EmailVerificationService } from './email-verification.service';
 import { OtpService } from './otp.service';
 import { OtpPurpose } from './types/otp-purpose.enum';
@@ -126,7 +129,12 @@ export class AuthService {
     await this.sms.sendOtp(phone, code);
   }
 
-  async verifyOtp(phone: string, code: string, purpose: OtpPurpose): Promise<TokenPair> {
+  async verifyOtp(
+    phone: string,
+    code: string,
+    purpose: OtpPurpose,
+    context?: RequestContext,
+  ): Promise<TokenPair> {
     const user = await this.prisma.user.findUnique({ where: { phone } });
     if (!user) {
       throw new UnauthorizedException('Invalid code');
@@ -141,10 +149,10 @@ export class AuthService {
       });
     }
 
-    return this.issueTokenPair(user.id, user.role, user.phone);
+    return this.issueTokenPair(user.id, user.role, user.phone, context);
   }
 
-  async login(identifier: string, password: string): Promise<TokenPair> {
+  async login(identifier: string, password: string, context?: RequestContext): Promise<TokenPair> {
     const isEmail = identifier.includes('@');
     const user = isEmail
       ? await this.prisma.user.findUnique({ where: { email: identifier } })
@@ -163,7 +171,49 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    return this.issueTokenPair(user.id, user.role, user.phone);
+    return this.issueTokenPair(user.id, user.role, user.phone, context);
+  }
+
+  // Authenticated password change — distinct from the OTP-gated
+  // /auth/password/reset flow. Verifies the current password, then rotates
+  // the hash and burns every OTHER session (the caller keeps theirs).
+  async changePassword(
+    userId: string,
+    dto: { currentPassword: string; newPassword: string; confirmPassword: string },
+    currentSessionId?: string,
+  ) {
+    if (dto.newPassword !== dto.confirmPassword) {
+      throw new BadRequestException('newPassword and confirmPassword do not match');
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.passwordHash) {
+      throw new BadRequestException('This account has no password set');
+    }
+    const valid = await argon2.verify(user.passwordHash, dto.currentPassword);
+    if (!valid) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException('New password must be different from the current one');
+    }
+
+    const passwordHash = await argon2.hash(dto.newPassword);
+    await this.prisma.$transaction([
+      this.prisma.user.update({ where: { id: userId }, data: { passwordHash } }),
+      this.prisma.refreshToken.updateMany({
+        where: {
+          userId,
+          revokedAt: null,
+          ...(currentSessionId ? { id: { not: currentSessionId } } : {}),
+        },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    return {
+      success: true,
+      message: 'Password changed successfully. Please log in again if required.',
+    };
   }
 
   private findByIdentifier(identifier: string) {
@@ -222,7 +272,7 @@ export class AuthService {
     return { message: 'Password has been reset — please log in with your new password' };
   }
 
-  async refresh(refreshToken: string): Promise<TokenPair> {
+  async refresh(refreshToken: string, context?: RequestContext): Promise<TokenPair> {
     const tokenHash = hashToken(refreshToken);
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash },
@@ -255,7 +305,12 @@ export class AuthService {
       data: { revokedAt: new Date() },
     });
 
-    return this.issueTokenPair(user.id, user.role, user.phone);
+    // Carry the device/IP forward from the rotated token when the caller
+    // didn't supply fresh request context.
+    return this.issueTokenPair(user.id, user.role, user.phone, {
+      ip: context?.ip ?? stored.ipAddress ?? undefined,
+      userAgent: context?.userAgent ?? stored.userAgent ?? undefined,
+    });
   }
 
   async logout(refreshToken: string) {
@@ -269,19 +324,31 @@ export class AuthService {
 
   // Public: reused by InvitesService to log a user in immediately after
   // accepting a staff invite, the same way OTP verification does.
-  async issueTokenPair(userId: string, role: UserRole, phone: string): Promise<TokenPair> {
-    const accessToken = this.jwt.sign({ sub: userId, role, phone });
-
+  async issueTokenPair(
+    userId: string,
+    role: UserRole,
+    phone: string,
+    context?: RequestContext,
+  ): Promise<TokenPair> {
     const refreshToken = generateSecureToken();
     const refreshTtlMs = parseDuration(this.config.get<string>('JWT_REFRESH_EXPIRES_IN') ?? '30d');
-    await this.prisma.refreshToken.create({
+    const device = context?.userAgent ? describeUserAgent(context.userAgent) : null;
+
+    // Refresh row first — its id becomes the access token's `sid` claim,
+    // which is how GET /users/me/sessions marks the current device.
+    const stored = await this.prisma.refreshToken.create({
       data: {
         userId,
         tokenHash: hashToken(refreshToken),
         expiresAt: new Date(Date.now() + refreshTtlMs),
+        deviceLabel: device?.deviceLabel ?? null,
+        userAgent: context?.userAgent ?? null,
+        ipAddress: context?.ip ?? null,
+        lastUsedAt: new Date(),
       },
     });
 
+    const accessToken = this.jwt.sign({ sub: userId, role, phone, sid: stored.id });
     return { accessToken, refreshToken };
   }
 }

@@ -146,7 +146,7 @@ async function cleanup() {
     ['chargingStation', { name: { startsWith: '[SEED] ' } }],
     ['supportTicketMessage', { ticket: byUserEmail }],
     ['supportTicket', byUserEmail],
-    ['solarAssessment', byUserEmail],
+    ['solarAssessment', { OR: [byUserEmail, { contactEmail: { endsWith: SD } }] }],
     ['driverStatus', byUserEmail],
     ['tariff', { serviceArea: { name: { startsWith: '[SEED] ' } } }],
     ['commissionRule', { vehicleType: { startsWith: 'SEED-' } }],
@@ -934,9 +934,10 @@ async function main() {
         lng: lagosLng(),
         chargerTypes: someOf(['CCS', 'CHAdeMO', 'Type2', 'GB/T'], int(1, 3)),
         connectorCount: int(2, 12),
+        availableBays: int(0, 8),
         speedKw: money(7, 150),
         pricePerKwh: money(80, 300),
-        status: pick(['OPERATIONAL', 'MAINTENANCE', 'OFFLINE'], i),
+        status: pick(['AVAILABLE', 'BUSY', 'MAINTENANCE', 'OFFLINE'], i),
         isActive: i % 6 !== 0,
       },
     });
@@ -950,6 +951,7 @@ async function main() {
           totalSlots: int(6, 24),
           availableBatteries: int(0, 6),
           pricePerSwap: money(500, 2500),
+          status: pick(['AVAILABLE', 'MAINTENANCE', 'UNAVAILABLE'], i),
           isActive: i % 5 !== 0,
         },
       }),
@@ -975,16 +977,25 @@ async function main() {
   // ── Solar assessments ────────────────────────────────────────────────
   console.log('Seeding solar assessments…');
   for (const i of range(N)) {
+    // Even rows: rider-submitted (linked user). Odd rows: admin-entered
+    // leads with standalone contact details and no linked account.
+    const adminLead = i % 2 === 1;
+    const leadUser = adminLead ? null : pick(allUsers, i);
     await prisma.solarAssessment.create({
       data: {
-        userId: pick(allUsers, i).id,
+        userId: leadUser ? leadUser.id : null,
         address: streetAddress(),
         lat: lagosLat(),
         lng: lagosLng(),
         monthlyBillEstimate: money(15000, 250000),
-        propertyType: pick(['Residential', 'Commercial', 'Industrial'], i),
+        propertyType: pick(['Duplex', 'Bungalow', 'Villa', 'Apartment', 'Condo'], i),
         notes: i % 2 === 0 ? sentence() : null,
-        status: pick(['NEW', 'CONTACTED', 'QUALIFIED', 'CONVERTED', 'CLOSED'], i),
+        contactName: adminLead ? fullName() : null,
+        contactPhone: adminLead ? `+23470${String(i).padStart(8, '0')}` : null,
+        contactEmail: adminLead ? `solar.lead.${i}${SD}` : null,
+        systemSizeKw: adminLead ? money(3, 15) : null,
+        energyNeed: adminLead ? pick(['Partial home', 'Full home'], i) : null,
+        status: pick(['NEW', 'CONTACTED', 'SITE_VISIT', 'CONVERTED', 'AVAILABLE'], i),
         assignedRepId: i % 2 === 0 ? admin.id : null,
       },
     });

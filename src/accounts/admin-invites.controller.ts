@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -39,5 +48,12 @@ export class AdminInvitesController {
   @Post(':id/revoke')
   revokeInvite(@Param('id') id: string) {
     return this.invitesService.revokeInvite(id);
+  }
+
+  @RequirePermissions('staff.invite')
+  @HttpCode(HttpStatus.OK)
+  @Post(':id/resend')
+  resendInvite(@Param('id') id: string) {
+    return this.invitesService.resendInvite(id);
   }
 }

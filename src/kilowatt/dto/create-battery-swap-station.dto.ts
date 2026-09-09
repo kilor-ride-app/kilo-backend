@@ -1,39 +1,60 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { BatterySwapStationStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsInt, IsLatitude, IsLongitude, IsNumber, IsString, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsLatitude,
+  IsLongitude,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+} from 'class-validator';
 
+// See CreateChargingStationDto for the naming rationale. Maps onto
+// `address`/`lat`/`lng`/`totalSlots`/`availableBatteries`/`status`.
 export class CreateBatterySwapStationDto {
   @ApiProperty()
   @IsString()
   name: string;
 
-  @ApiProperty()
+  @ApiProperty({ example: 'Alausa, Ikeja' })
   @IsString()
-  address: string;
+  location: string;
 
-  @ApiProperty()
+  @ApiProperty({ example: 6.6018 })
   @IsLatitude()
-  lat: number;
+  latitude: number;
 
-  @ApiProperty()
+  @ApiProperty({ example: 3.3515 })
   @IsLongitude()
-  lng: number;
+  longitude: number;
 
-  @ApiProperty({ example: 10 })
+  @ApiProperty({ example: 12, description: 'Total battery slots' })
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  totalSlots: number;
+  totalBays: number;
 
-  @ApiProperty({ example: 10 })
+  @ApiProperty({ example: 8, description: 'Charged batteries currently available' })
   @Type(() => Number)
   @IsInt()
   @Min(0)
-  availableBatteries: number;
+  availableBays: number;
 
-  @ApiProperty({ example: 2500 })
+  @ApiPropertyOptional({
+    enum: BatterySwapStationStatus,
+    example: BatterySwapStationStatus.AVAILABLE,
+  })
+  @IsOptional()
+  @IsEnum(BatterySwapStationStatus)
+  status?: BatterySwapStationStatus;
+
+  @ApiPropertyOptional({ example: 2500 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  pricePerSwap: number;
+  pricePerSwap?: number;
 }

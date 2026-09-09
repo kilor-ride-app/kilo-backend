@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -22,6 +23,7 @@ import { BatterySwapService } from './battery-swap.service';
 import { ChargingStationsService } from './charging-stations.service';
 import { CreateBatterySwapStationDto } from './dto/create-battery-swap-station.dto';
 import { CreateChargingStationDto } from './dto/create-charging-station.dto';
+import { CreateSolarLeadDto } from './dto/create-solar-lead.dto';
 import { UpdateBatterySwapStationDto } from './dto/update-battery-swap-station.dto';
 import { UpdateChargingStationDto } from './dto/update-charging-station.dto';
 import { ListSolarLeadsQueryDto } from './dto/list-solar-leads-query.dto';
@@ -56,6 +58,12 @@ export class AdminKilowattController {
     return this.chargingStations.updateStation(id, dto);
   }
 
+  @HttpCode(HttpStatus.OK)
+  @Delete('charging-stations/:id')
+  deleteStation(@Param('id') id: string) {
+    return this.chargingStations.deleteStation(id);
+  }
+
   @Get('battery-swap/stations')
   listSwapStations() {
     return this.batterySwap.listAllStations();
@@ -71,6 +79,12 @@ export class AdminKilowattController {
     return this.batterySwap.updateStation(id, dto);
   }
 
+  @HttpCode(HttpStatus.OK)
+  @Delete('battery-swap/stations/:id')
+  deleteSwapStation(@Param('id') id: string) {
+    return this.batterySwap.deleteStation(id);
+  }
+
   @Get('battery-swap/reservations')
   listReservations(@Query() query: PaginationDto) {
     return this.batterySwap.listAllReservations(query.take, query.skip);
@@ -81,9 +95,20 @@ export class AdminKilowattController {
     return this.solarAssessments.listLeads(query.status, query.take, query.skip);
   }
 
+  @Post('solar-leads')
+  createSolarLead(@Body() dto: CreateSolarLeadDto) {
+    return this.solarAssessments.createLead(dto);
+  }
+
   @HttpCode(HttpStatus.OK)
   @Patch('solar-leads/:id')
   updateSolarLead(@Param('id') id: string, @Body() dto: UpdateSolarLeadDto) {
     return this.solarAssessments.updateLead(id, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Delete('solar-leads/:id')
+  deleteSolarLead(@Param('id') id: string) {
+    return this.solarAssessments.deleteLead(id);
   }
 }

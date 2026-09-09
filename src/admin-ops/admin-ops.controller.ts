@@ -24,6 +24,7 @@ import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { AdminOpsService } from './admin-ops.service';
 import { AnalyticsService } from './analytics.service';
 import { ListAuditQueryDto } from './dto/list-audit-query.dto';
+import { LiveMapQueryDto } from './dto/live-map-query.dto';
 import { ListDriversQueryDto } from './dto/list-drivers-query.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { SuspendUserDto } from './dto/suspend-user.dto';
@@ -61,6 +62,12 @@ export class AdminOpsController {
   @Get('dashboard/live-map')
   getLiveMap() {
     return this.adminOps.getLiveMap();
+  }
+
+  @RequirePermissions('admin.dashboard.view')
+  @Get('live-map/fleet')
+  getFleetMap(@Query() query: LiveMapQueryDto) {
+    return this.adminOps.getFleetMap(query);
   }
 
   @RequirePermissions('admin.users.manage')

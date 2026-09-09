@@ -49,8 +49,33 @@ const USER_SUMMARY_SELECT = {
   phone: true,
   role: true,
   status: true,
+  profilePhotoUrl: true,
   createdAt: true,
 } as const;
+
+// Rides/deliveries whose money is final — what the list-view lifetime
+// totals (trips, earnings, commission) are summed over.
+const SETTLED_RIDE_STATUS: RideStatus = RideStatus.COMPLETED;
+const SETTLED_DELIVERY_STATUS: DeliveryStatus = DeliveryStatus.COMPLETED;
+
+function decimalToFixed(value: Prisma.Decimal | null | undefined): string {
+  return (value ?? new Prisma.Decimal(0)).toFixed(2);
+}
+
+// "minLat,minLng,maxLat,maxLng" → bounding box, or null if unparseable.
+function parseBounds(
+  raw?: string,
+): { minLat: number; minLng: number; maxLat: number; maxLng: number } | null {
+  if (!raw) {
+    return null;
+  }
+  const parts = raw.split(',').map((n) => Number(n.trim()));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
+    return null;
+  }
+  const [minLat, minLng, maxLat, maxLng] = parts;
+  return { minLat, minLng, maxLat, maxLng };
+}
 
 const USER_DETAIL_SELECT = {
   ...USER_SUMMARY_SELECT,
@@ -294,20 +319,224 @@ export class AdminOpsService {
     return { onlineDrivers, activeRides };
   }
 
+  // ── Live map (fleet REST payload) ────────────────────────────────────
+  // Best-effort snapshot for the admin live map. Real-time telemetry
+  // (speed, heading, per-trip current position) has no producer yet — the
+  // only live signal is driver lng/lat in the Redis GEO set. speedKmH /
+  // heading are therefore omitted; a driver's Redis position doubles as
+  // the "currentLocation" for their active trip/delivery.
+  async getFleetMap(query: { state?: string; bounds?: string }) {
+    const box = parseBounds(query.bounds);
+
+    const geoDriverIds = await this.redis.client.zrange(GEO_KEY, 0, -1);
+    const positionById = new Map<string, { lat: number; lng: number }>();
+    if (geoDriverIds.length > 0) {
+      const positions = await this.redis.client.geopos(GEO_KEY, ...geoDriverIds);
+      geoDriverIds.forEach((id, i) => {
+        const coords = positions[i];
+        if (coords) {
+          positionById.set(id, { lng: Number(coords[0]), lat: Number(coords[1]) });
+        }
+      });
+    }
+
+    const [statuses, activeRides, activeDeliveries, stations, onlineCount, offlineCount] =
+      await Promise.all([
+        this.prisma.driverStatus.findMany({
+          where: { availability: { not: DriverAvailability.OFFLINE } },
+          select: { userId: true, availability: true, serviceMode: true, vehicleType: true },
+        }),
+        this.prisma.ride.findMany({
+          where: { status: { in: ACTIVE_RIDE_STATUSES } },
+          select: {
+            id: true,
+            status: true,
+            driverId: true,
+            riderId: true,
+            finalFare: true,
+            estimatedFare: true,
+            pickupLat: true,
+            pickupLng: true,
+            pickupAddress: true,
+            dropoffLat: true,
+            dropoffLng: true,
+            dropoffAddress: true,
+          },
+        }),
+        this.prisma.delivery.findMany({
+          where: { status: { in: ACTIVE_DELIVERY_STATUSES } },
+          select: {
+            id: true,
+            status: true,
+            driverId: true,
+            packageDescription: true,
+            pickupLat: true,
+            pickupLng: true,
+          },
+        }),
+        this.prisma.chargingStation.findMany({
+          where: { isActive: true },
+          select: {
+            id: true,
+            name: true,
+            lat: true,
+            lng: true,
+            connectorCount: true,
+            availableBays: true,
+            status: true,
+          },
+        }),
+        this.prisma.driverStatus.count({ where: { availability: DriverAvailability.ONLINE } }),
+        this.prisma.driverStatus.count({ where: { availability: DriverAvailability.OFFLINE } }),
+      ]);
+
+    // Names/phones for every driver referenced by a status, ride or delivery.
+    const namedIds = new Set<string>([
+      ...statuses.map((s) => s.userId),
+      ...activeRides.map((r) => r.driverId).filter((id): id is string => !!id),
+      ...activeDeliveries.map((d) => d.driverId).filter((id): id is string => !!id),
+    ]);
+    const users = namedIds.size
+      ? await this.prisma.user.findMany({
+          where: { id: { in: [...namedIds] } },
+          select: { id: true, firstName: true, lastName: true, phone: true },
+        })
+      : [];
+    const userById = new Map(users.map((u) => [u.id, u]));
+    const nameOf = (id?: string | null) => {
+      const u = id ? userById.get(id) : undefined;
+      return u ? `${u.firstName} ${u.lastName}`.trim() : null;
+    };
+
+    const inBox = (lat: number, lng: number) =>
+      !box || (lat >= box.minLat && lat <= box.maxLat && lng >= box.minLng && lng <= box.maxLng);
+
+    const drivers = statuses
+      .map((s) => {
+        const pos = positionById.get(s.userId);
+        const u = userById.get(s.userId);
+        return {
+          id: s.userId,
+          name: u ? `${u.firstName} ${u.lastName}`.trim() : null,
+          phone: u?.phone ?? null,
+          status: s.availability,
+          activity: s.serviceMode,
+          lat: pos?.lat ?? null,
+          lng: pos?.lng ?? null,
+          vehicle: s.vehicleType ? { type: s.vehicleType } : null,
+        };
+      })
+      .filter((d) => d.lat === null || inBox(d.lat, d.lng as number));
+
+    const trips = activeRides
+      .filter((r) => inBox(r.pickupLat, r.pickupLng))
+      .map((r) => {
+        const pos = r.driverId ? positionById.get(r.driverId) : undefined;
+        return {
+          id: r.id,
+          driverId: r.driverId,
+          driverName: nameOf(r.driverId),
+          riderId: r.riderId,
+          status: r.status,
+          fare: decimalToFixed(r.finalFare ?? r.estimatedFare),
+          pickup: { lat: r.pickupLat, lng: r.pickupLng, address: r.pickupAddress },
+          destination: { lat: r.dropoffLat, lng: r.dropoffLng, address: r.dropoffAddress },
+          currentLocation: pos ?? null,
+        };
+      });
+
+    const deliveries = activeDeliveries
+      .filter((d) => inBox(d.pickupLat, d.pickupLng))
+      .map((d) => {
+        const pos = d.driverId ? positionById.get(d.driverId) : undefined;
+        return {
+          id: d.id,
+          driverId: d.driverId,
+          driverName: nameOf(d.driverId),
+          status: d.status,
+          packageType: d.packageDescription,
+          currentLocation: pos ?? null,
+        };
+      });
+
+    const mappedStations = stations
+      .filter((s) => inBox(s.lat, s.lng))
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        type: 'CHARGING_STATION' as const,
+        lat: s.lat,
+        lng: s.lng,
+        totalBays: s.connectorCount,
+        availableBays: s.availableBays,
+        status: s.status,
+      }));
+
+    return {
+      timestamp: new Date().toISOString(),
+      summary: {
+        onlineDrivers: onlineCount,
+        onTripRides: activeRides.length,
+        onDeliveries: activeDeliveries.length,
+        activeChargingHubs: mappedStations.filter(
+          (s) => s.status === 'AVAILABLE' || s.status === 'BUSY' || s.status === 'OPERATIONAL',
+        ).length,
+        offlineDrivers: offlineCount,
+      },
+      drivers,
+      trips,
+      deliveries,
+      stations: mappedStations,
+    };
+  }
+
   // ── Lists ─────────────────────────────────────────────────────────────
 
-  listRiders(query: ListUsersQueryDto) {
-    return this.prisma.user.findMany({
+  async listRiders(query: ListUsersQueryDto) {
+    const riders = await this.prisma.user.findMany({
       where: this.userListWhere(UserRole.RIDER, query),
       select: USER_SUMMARY_SELECT,
       orderBy: { createdAt: 'desc' },
       take: query.take ?? 50,
       skip: query.skip ?? 0,
     });
+
+    const ids = riders.map((r) => r.id);
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const [rideStats, deliveryStats, wallets] = await Promise.all([
+      this.prisma.ride.groupBy({
+        by: ['riderId'],
+        where: { riderId: { in: ids }, status: SETTLED_RIDE_STATUS },
+        _count: true,
+      }),
+      this.prisma.delivery.groupBy({
+        by: ['senderId'],
+        where: { senderId: { in: ids }, status: SETTLED_DELIVERY_STATUS },
+        _count: true,
+      }),
+      this.prisma.account.findMany({
+        where: { ownerId: { in: ids }, type: AccountType.RIDER_WALLET },
+        select: { ownerId: true, balance: true },
+      }),
+    ]);
+
+    const tripsById = new Map(rideStats.map((r) => [r.riderId, r._count]));
+    const deliveriesById = new Map(deliveryStats.map((d) => [d.senderId, d._count]));
+    const balanceById = new Map(wallets.map((w) => [w.ownerId, w.balance]));
+
+    return riders.map((rider) => ({
+      ...rider,
+      walletBalance: decimalToFixed(balanceById.get(rider.id)),
+      totalTrips: tripsById.get(rider.id) ?? 0,
+      totalDeliveries: deliveriesById.get(rider.id) ?? 0,
+    }));
   }
 
-  listDrivers(query: ListDriversQueryDto) {
-    return this.prisma.user.findMany({
+  async listDrivers(query: ListDriversQueryDto) {
+    const drivers = await this.prisma.user.findMany({
       where: {
         ...this.userListWhere(UserRole.DRIVER, query),
         ...(query.availability ? { driverStatus: { availability: query.availability } } : {}),
@@ -319,6 +548,51 @@ export class AdminOpsService {
       orderBy: { createdAt: 'desc' },
       take: query.take ?? 50,
       skip: query.skip ?? 0,
+    });
+
+    const ids = drivers.map((d) => d.id);
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const [rideStats, deliveryStats] = await Promise.all([
+      this.prisma.ride.groupBy({
+        by: ['driverId'],
+        where: { driverId: { in: ids }, status: SETTLED_RIDE_STATUS },
+        _count: true,
+        _sum: { finalFare: true, commissionAmount: true },
+      }),
+      this.prisma.delivery.groupBy({
+        by: ['driverId'],
+        where: { driverId: { in: ids }, status: SETTLED_DELIVERY_STATUS },
+        _count: true,
+        _sum: { finalFare: true, commissionAmount: true },
+      }),
+    ]);
+
+    const rideById = new Map(rideStats.map((r) => [r.driverId, r]));
+    const deliveryById = new Map(deliveryStats.map((d) => [d.driverId, d]));
+
+    return drivers.map((driver) => {
+      const rides = rideById.get(driver.id);
+      const deliveries = deliveryById.get(driver.id);
+      const grossFare = (rides?._sum.finalFare ?? new Prisma.Decimal(0)).plus(
+        deliveries?._sum.finalFare ?? new Prisma.Decimal(0),
+      );
+      const commission = (rides?._sum.commissionAmount ?? new Prisma.Decimal(0)).plus(
+        deliveries?._sum.commissionAmount ?? new Prisma.Decimal(0),
+      );
+
+      return {
+        ...driver,
+        // Flattened alongside the nested driverStatus object for the
+        // admin table, which reads these off the top level.
+        availability: driver.driverStatus?.availability ?? DriverAvailability.OFFLINE,
+        vehicleType: driver.driverStatus?.vehicleType ?? null,
+        totalTrips: (rides?._count ?? 0) + (deliveries?._count ?? 0),
+        totalEarnings: decimalToFixed(grossFare.minus(commission)),
+        totalCommission: decimalToFixed(commission),
+      };
     });
   }
 

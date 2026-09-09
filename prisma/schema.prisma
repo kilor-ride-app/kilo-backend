@@ -66,6 +66,11 @@ model User {
   // PermissionsGuard) rather than needing every permission assigned.
   staffRoles Role[]
 
+  // Per-user permission grants layered on top of staffRoles — set from the
+  // admin staff-management screen when a user needs a capability outside
+  // their role's bundle. PermissionsGuard unions these with role grants.
+  directPermissions Permission[] @relation("DirectPermissions")
+
   sentInvites    StaffInvite[] @relation("InvitedBy")
   acceptedInvite StaffInvite?  @relation("AcceptedBy")
 
@@ -161,6 +166,7 @@ model Permission {
   key         String  @unique
   description String?
   roles       Role[]
+  directUsers User[]  @relation("DirectPermissions")
 
   createdAt DateTime @default(now())
 
@@ -226,6 +232,13 @@ model RefreshToken {
   revokedAt DateTime?
   expiresAt DateTime
   createdAt DateTime  @default(now())
+
+  // Session metadata — captured at issue time from the request, surfaced
+  // by GET /users/me/sessions so a user can review & revoke devices.
+  deviceLabel String?
+  userAgent   String?
+  ipAddress   String?
+  lastUsedAt  DateTime?
 
   @@index([userId])
   @@map("refresh_tokens")
@@ -1023,12 +1036,19 @@ model DeliveryOffer {
 // just for a business's credit line instead of a driver's cash float.
 // ─────────────────────────────────────────────────────────────
 
+enum BusinessStatus {
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+}
+
 model Business {
-  id                 String  @id @default(uuid())
+  id                 String         @id @default(uuid())
   name               String
   registrationNumber String?
   contactEmail       String?
   contactPhone       String?
+  status             BusinessStatus @default(ACTIVE)
 
   // Admin-set ceiling on outstanding (unpaid, accrued) balance —
   // BUSINESS_CREDIT_PAYABLE.balance is checked against this at booking
@@ -1119,6 +1139,8 @@ model Invoice {
 
 enum ChargingStationStatus {
   OPERATIONAL
+  AVAILABLE
+  BUSY
   MAINTENANCE
   OFFLINE
 }
@@ -1133,6 +1155,9 @@ model ChargingStation {
   // connector standard doesn't need a migration.
   chargerTypes   String[]
   connectorCount Int
+  // Bays currently free — nullable because the rider-facing create flow
+  // and older rows don't track it; the admin dashboard sets it.
+  availableBays  Int?
   speedKw        Decimal               @db.Decimal(6, 2)
   pricePerKwh    Decimal               @db.Decimal(10, 2)
   status         ChargingStationStatus @default(OPERATIONAL)
@@ -1151,16 +1176,23 @@ enum BatterySwapReservationStatus {
   CANCELLED
 }
 
+enum BatterySwapStationStatus {
+  AVAILABLE
+  MAINTENANCE
+  UNAVAILABLE
+}
+
 model BatterySwapStation {
-  id                 String  @id @default(uuid())
+  id                 String                   @id @default(uuid())
   name               String
   address            String
   lat                Float
   lng                Float
   totalSlots         Int
   availableBatteries Int
-  pricePerSwap       Decimal @db.Decimal(10, 2)
-  isActive           Boolean @default(true)
+  pricePerSwap       Decimal                  @db.Decimal(10, 2)
+  status             BatterySwapStationStatus @default(AVAILABLE)
+  isActive           Boolean                  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1199,20 +1231,32 @@ enum SolarLeadStatus {
   NEW
   CONTACTED
   QUALIFIED
+  SITE_VISIT
   CONVERTED
   CLOSED
+  AVAILABLE
 }
 
 model SolarAssessment {
   id                  String   @id @default(uuid())
-  userId              String
-  user                User     @relation(fields: [userId], references: [id])
+  // Optional: rider-submitted assessments carry the rider's userId; leads
+  // created by admin from the dashboard (phone enquiries, field sign-ups)
+  // have no linked account and populate the contact* fields instead.
+  userId              String?
+  user                User?    @relation(fields: [userId], references: [id])
   address             String
   lat                 Float?
   lng                 Float?
   monthlyBillEstimate Decimal? @db.Decimal(10, 2)
   propertyType        String?
   notes               String?
+
+  // Admin-entered lead contact details (when there's no linked user).
+  contactName  String?
+  contactPhone String?
+  contactEmail String?
+  systemSizeKw Decimal? @db.Decimal(6, 2)
+  energyNeed   String?
 
   status        SolarLeadStatus @default(NEW)
   assignedRepId String?

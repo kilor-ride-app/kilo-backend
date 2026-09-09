@@ -2,7 +2,9 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -17,6 +19,8 @@ const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class InvitesService {
+  private readonly logger = new Logger(InvitesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
@@ -54,13 +58,20 @@ export class InvitesService {
       include: { roles: true },
     });
 
-    const acceptUrl = `${this.config.get<string>('ADMIN_APP_URL') ?? 'http://localhost:5174'}/invite/accept?token=${rawToken}`;
-    await this.email.sendStaffInvite(
+    // The DB write and the email aren't one transaction. If the email
+    // fails, roll the row back so the admin can simply retry instead of
+    // hitting "an invite is already pending" with no email ever sent.
+    await this.dispatchInviteEmail(
       dto.email,
       roles.map((r) => r.name),
-      acceptUrl,
-      INVITE_TTL_MS / (24 * 60 * 60 * 1000),
-    );
+      rawToken,
+    ).catch(async (err) => {
+      await this.prisma.staffInvite.delete({ where: { id: invite.id } }).catch(() => undefined);
+      this.logger.error(`Staff invite email to ${dto.email} failed — invite rolled back`, err);
+      throw new ServiceUnavailableException(
+        'Invitation email could not be delivered — please try again',
+      );
+    });
 
     return {
       id: invite.id,
@@ -68,6 +79,60 @@ export class InvitesService {
       roles: invite.roles.map((r) => r.name),
       expiresAt: invite.expiresAt,
     };
+  }
+
+  // Regenerates the token, extends the expiry, and re-sends the email for a
+  // still-pending invite. On email failure the existing row is left intact
+  // (unlike createInvite, there's nothing new to roll back).
+  async resendInvite(id: string) {
+    const invite = await this.prisma.staffInvite.findUnique({
+      where: { id },
+      include: { roles: true },
+    });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    if (invite.status !== InviteStatus.PENDING) {
+      throw new BadRequestException('Only pending invites can be resent');
+    }
+
+    const rawToken = generateSecureToken();
+    const updated = await this.prisma.staffInvite.update({
+      where: { id },
+      data: {
+        tokenHash: hashToken(rawToken),
+        expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+      },
+      include: { roles: true },
+    });
+
+    await this.dispatchInviteEmail(
+      updated.email,
+      updated.roles.map((r) => r.name),
+      rawToken,
+    ).catch((err) => {
+      this.logger.error(`Staff invite resend to ${updated.email} failed`, err);
+      throw new ServiceUnavailableException(
+        'Invitation email could not be delivered — please try again',
+      );
+    });
+
+    return {
+      id: updated.id,
+      email: updated.email,
+      roles: updated.roles.map((r) => r.name),
+      expiresAt: updated.expiresAt,
+    };
+  }
+
+  private async dispatchInviteEmail(email: string, roleNames: string[], rawToken: string) {
+    const acceptUrl = `${this.config.get<string>('ADMIN_APP_URL') ?? 'http://localhost:5174'}/invite/accept?token=${rawToken}`;
+    await this.email.sendStaffInvite(
+      email,
+      roleNames,
+      acceptUrl,
+      INVITE_TTL_MS / (24 * 60 * 60 * 1000),
+    );
   }
 
   async listInvites() {

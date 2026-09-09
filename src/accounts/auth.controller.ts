@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, Headers, HttpCode, HttpStatus, Ip, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -44,15 +44,15 @@ export class AuthController {
 
   @Throttle(AUTH_THROTTLE)
   @Post('otp/verify')
-  verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.authService.verifyOtp(dto.phone, dto.code, dto.purpose);
+  verifyOtp(@Body() dto: VerifyOtpDto, @Ip() ip: string, @Headers('user-agent') userAgent: string) {
+    return this.authService.verifyOtp(dto.phone, dto.code, dto.purpose, { ip, userAgent });
   }
 
   @Throttle(AUTH_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Post('login')
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto.identifier, dto.password);
+  login(@Body() dto: LoginDto, @Ip() ip: string, @Headers('user-agent') userAgent: string) {
+    return this.authService.login(dto.identifier, dto.password, { ip, userAgent });
   }
 
   @Throttle(AUTH_THROTTLE)
@@ -71,8 +71,12 @@ export class AuthController {
 
   @HttpCode(HttpStatus.OK)
   @Post('token/refresh')
-  refresh(@Body() dto: RefreshTokenDto) {
-    return this.authService.refresh(dto.refreshToken);
+  refresh(
+    @Body() dto: RefreshTokenDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent: string,
+  ) {
+    return this.authService.refresh(dto.refreshToken, { ip, userAgent });
   }
 
   @HttpCode(HttpStatus.OK)

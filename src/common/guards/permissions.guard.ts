@@ -35,7 +35,12 @@ export class PermissionsGuard implements CanActivate {
     }
 
     const grantedKeys = await this.prisma.permission.findMany({
-      where: { roles: { some: { users: { some: { id: user.userId } } } } },
+      where: {
+        OR: [
+          { roles: { some: { users: { some: { id: user.userId } } } } },
+          { directUsers: { some: { id: user.userId } } },
+        ],
+      },
       select: { key: true },
     });
     const granted = new Set(grantedKeys.map((p) => p.key));

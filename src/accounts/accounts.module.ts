@@ -2,12 +2,15 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { AuditModule } from '../audit/audit.module';
 import { AppleModule } from '../integrations/apple/apple.module';
 import { EmailModule } from '../integrations/email/email.module';
 import { GoogleModule } from '../integrations/google/google.module';
+import { R2Module } from '../integrations/r2/r2.module';
 import { SmsModule } from '../integrations/sms/sms.module';
 import { AdminInvitesController } from './admin-invites.controller';
 import { AdminPermissionsController, AdminRolesController } from './admin-roles.controller';
+import { AdminProfileController } from './admin-profile.controller';
 import { AdminStaffController } from './admin-staff.controller';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -15,6 +18,7 @@ import { EmailVerificationService } from './email-verification.service';
 import { InvitesService } from './invites.service';
 import { OtpService } from './otp.service';
 import { RolesService } from './roles.service';
+import { SessionsService } from './sessions.service';
 import { SocialAuthController } from './social-auth.controller';
 import { SocialAuthService } from './social-auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -28,6 +32,8 @@ import { UsersService } from './users.service';
     EmailModule,
     GoogleModule,
     AppleModule,
+    R2Module,
+    AuditModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -42,6 +48,7 @@ import { UsersService } from './users.service';
   controllers: [
     AuthController,
     UsersController,
+    AdminProfileController,
     AdminStaffController,
     AdminInvitesController,
     AdminRolesController,
@@ -51,6 +58,7 @@ import { UsersService } from './users.service';
   providers: [
     AuthService,
     UsersService,
+    SessionsService,
     InvitesService,
     RolesService,
     JwtStrategy,

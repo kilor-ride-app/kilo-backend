@@ -1,17 +1,34 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { ChargingStationStatus } from '@prisma/client';
+import { ChargingStation, ChargingStationStatus } from '@prisma/client';
 import { haversineDistanceKm } from '../common/utils/haversine.util';
 import { PrismaService } from '../prisma/prisma.service';
 
-interface ChargingStationInput {
+// Admin dashboard payload — accepts the doc's field names.
+interface AdminChargingStationInput {
   name: string;
-  address: string;
-  lat: number;
-  lng: number;
-  chargerTypes: string[];
-  connectorCount: number;
-  speedKw: number;
-  pricePerKwh: number;
+  location: string;
+  latitude: number;
+  longitude: number;
+  totalBays: number;
+  availableBays?: number;
+  status?: ChargingStationStatus;
+  chargerTypes?: string[];
+  speedKw?: number;
+  pricePerKwh?: number;
+  isActive?: boolean;
+}
+
+// Storage columns → dashboard-facing shape. Keeps the raw columns too so
+// existing consumers don't break.
+export function toChargingStationView(s: ChargingStation) {
+  return {
+    ...s,
+    location: s.address,
+    latitude: s.lat,
+    longitude: s.lng,
+    totalBays: s.connectorCount,
+    availableBays: s.availableBays,
+  };
 }
 
 @Injectable()
@@ -54,18 +71,54 @@ export class ChargingStationsService {
   }
 
   async listAll() {
-    return this.prisma.chargingStation.findMany({ orderBy: { createdAt: 'desc' } });
+    const stations = await this.prisma.chargingStation.findMany({ orderBy: { createdAt: 'desc' } });
+    return stations.map(toChargingStationView);
   }
 
-  async createStation(dto: ChargingStationInput) {
-    return this.prisma.chargingStation.create({ data: dto });
+  async createStation(dto: AdminChargingStationInput) {
+    const station = await this.prisma.chargingStation.create({
+      data: {
+        name: dto.name,
+        address: dto.location,
+        lat: dto.latitude,
+        lng: dto.longitude,
+        connectorCount: dto.totalBays,
+        availableBays: dto.availableBays ?? dto.totalBays,
+        chargerTypes: dto.chargerTypes ?? [],
+        speedKw: dto.speedKw ?? 0,
+        pricePerKwh: dto.pricePerKwh ?? 0,
+        status: dto.status ?? ChargingStationStatus.AVAILABLE,
+      },
+    });
+    return toChargingStationView(station);
   }
 
-  async updateStation(
-    id: string,
-    dto: Partial<ChargingStationInput> & { status?: ChargingStationStatus; isActive?: boolean },
-  ) {
+  async updateStation(id: string, dto: Partial<AdminChargingStationInput>) {
     await this.getStation(id);
-    return this.prisma.chargingStation.update({ where: { id }, data: dto });
+    const station = await this.prisma.chargingStation.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.location !== undefined ? { address: dto.location } : {}),
+        ...(dto.latitude !== undefined ? { lat: dto.latitude } : {}),
+        ...(dto.longitude !== undefined ? { lng: dto.longitude } : {}),
+        ...(dto.totalBays !== undefined ? { connectorCount: dto.totalBays } : {}),
+        ...(dto.availableBays !== undefined ? { availableBays: dto.availableBays } : {}),
+        ...(dto.chargerTypes !== undefined ? { chargerTypes: dto.chargerTypes } : {}),
+        ...(dto.speedKw !== undefined ? { speedKw: dto.speedKw } : {}),
+        ...(dto.pricePerKwh !== undefined ? { pricePerKwh: dto.pricePerKwh } : {}),
+        ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+      },
+    });
+    return toChargingStationView(station);
+  }
+
+  // Soft delete — keeps the row (and any historical references) but hides
+  // it from every list/search.
+  async deleteStation(id: string) {
+    await this.getStation(id);
+    await this.prisma.chargingStation.update({ where: { id }, data: { isActive: false } });
+    return { deleted: true };
   }
 }

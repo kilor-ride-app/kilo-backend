@@ -341,6 +341,78 @@ Railway (or anywhere else this ever gets deployed).
   are manual steps documented in `DEPLOY.md` for the user to run themselves — same constraint as
   Render before it.
 
+### Kilo Admin backend requirements — Phase 2 (frontend integration gaps)
+
+Built against `~/Downloads/BACKEND_REQUIREMENTS.md`, a 12-section spec from the admin-dashboard
+frontend team. Follows the earlier admin-dashboard pass (see `~/.claude/plans/*` and the
+`admin-dashboard-endpoints` note). Migration: `20260909101700_admin_dashboard_phase2` (additive
+only — new `Business.status`/`BusinessStatus`, `ChargingStation.availableBays` + `AVAILABLE`/`BUSY`
+enum values, `BatterySwapStation.status`/`BatterySwapStationStatus`, `SolarAssessment` optional
+`userId` + `contact*`/`systemSizeKw`/`energyNeed` + `SITE_VISIT`/`AVAILABLE` statuses,
+`RefreshToken` device columns, `User.directPermissions` m2m).
+
+- **Driver/rider list aggregates** (§1–2) — `GET /admin/drivers` now returns `totalTrips`,
+  `totalEarnings` (`Σ finalFare − commission`, rides + deliveries), `totalCommission`, flattened
+  `availability`/`vehicleType`, `profilePhotoUrl`; `GET /admin/riders` returns `walletBalance`,
+  `totalTrips`, `totalDeliveries`. Batch `groupBy` over the page's ids — no N+1. Decimals as
+  fixed-2 strings.
+- **Business filters** (§3) — `GET /admin/business?status=&creditStatus=`. `status` is a real
+  column (`PATCH /admin/business/:id` suspends/reactivates, audited). `creditStatus`
+  (`OVERDUE`/`ON_CREDIT`/`NO_CREDIT`) is derived from `BUSINESS_CREDIT_PAYABLE` balance + overdue
+  invoices — annotated on every row, filtered in app code (can't be a Prisma `where`).
+- **Station CRUD** (§4) — admin DTOs now speak the doc's names (`location`/`latitude`/`longitude`/
+  `totalBays`/`availableBays`/`status`), mapped onto storage columns in the service; responses
+  carry both shapes. Added `DELETE /admin/charging-stations/:id` and
+  `DELETE /admin/battery-swap/stations/:id` (soft delete — `isActive=false`, reservations FK).
+- **Solar leads** (§5) — `POST` (admin-created, `userId: null`, `contact*` fields), `PATCH`
+  (all fields editable), `DELETE` (hard). List/response expose `name`/`phone`/`location`/
+  `systemSize`/`assignedToId` names.
+- **Staff management** (§6) — `GET /admin/staff?status=` (+ `staffRoles`, `directPermissions`,
+  `effectivePermissions`), `PATCH /admin/staff/:id` (`roleIds`, `status`, `permissionKeys`
+  validated against real `Permission.key` — the doc's example keys are placeholders),
+  `DELETE /admin/staff/:id` (de-provision: SUSPENDED + strip grants + revoke sessions; hard delete
+  impossible — FKs everywhere). `PermissionsGuard` now unions role grants with `directPermissions`.
+- **Support unified update** (§7) — `PATCH /admin/support/tickets/:id` (`status`/`priority`/
+  `assignedToId`/`resolutionNote`/`resolvedById`); RESOLVED/ESCALATED route through the existing
+  methods so their side effects fire. Old `POST :id/{assign,escalate,resolve}` kept.
+- **Avatar** (§8) — `POST /users/me/avatar` + `POST /admin/profile/avatar`, multipart, same
+  `FileInterceptor` + R2 pattern as KYC. Stores `${R2_PUBLIC_BASE_URL}/<key>` when set, else a
+  7-day signed URL. `ParseFilePipe` caps at 5 MB / jpeg|png|webp.
+- **Change password** (§9) — `POST /users/me/password` + `POST /admin/profile/change-password`;
+  verifies current password, rotates hash, revokes every *other* session (keeps the caller's,
+  matched on the new `sid` claim). Throttled.
+- **Device sessions** (§10) — access tokens now carry a `sid` claim = the `RefreshToken` row id;
+  `issueTokenPair`/`refresh` capture IP + UA (coarse `describeUserAgent` sniffer, no new dep).
+  `GET /users/me/sessions` + `DELETE .../:id` + `DELETE .../all-other`, aliased under
+  `/admin/profile/sessions*`. Reverse-geo `location` is out of scope (returns `null`).
+- **Live map** (§11) — `GET /admin/live-map/fleet?state=&bounds=` returns the doc's
+  `summary`/`drivers`/`trips`/`deliveries`/`stations` shape, best-effort from DB + the Redis
+  `drivers:geo` set. `speedKmH`/`heading`/per-trip `currentLocation` telemetry has **no producer**
+  — omitted; a driver's GEO position doubles as their trip's current location. **SSE stream
+  deferred** — no broadcast mechanism this pass.
+- **Staff invite email fix** (§12) — `createInvite` now rolls the DB row back (delete) when the
+  email dispatch throws, so a failed send no longer leaves a blocking `PENDING` row; returns
+  `503`. New `POST /admin/staff/invites/:id/resend` regenerates the token + expiry and re-sends.
+  The production root cause (unverified Resend sender domain) is a config fix, not code — noted in
+  `DEPLOY.md`/`.env.example` (`EMAIL_FROM`).
+
+**Verified live** against throwaway Postgres/Redis containers (build + lint + `prisma migrate
+deploy` of all 16 migrations clean, zero drift; seeded mock data): driver/rider aggregates
+non-zero and correct, business `creditStatus=OVERDUE` derivation, charging-station create (doc
+payload) + soft delete, solar lead create/patch-to-`SITE_VISIT`/delete, staff `PATCH` rejecting
+unknown permission keys + applying valid ones, ticket `PATCH → RESOLVED` (note added as a
+message, `resolvedById` set), invite-create rollback on email failure (no lingering `PENDING`,
+retry not blocked), invite resend, change-password wrong-vs-correct current password,
+`/users/me/sessions` flagging `isCurrentSession`, `/admin/live-map/fleet` shape. All throwaway
+data/containers removed after.
+
+**Not done from here**: the migration was validated on a throwaway DB (full replay + zero drift)
+but **not applied to the real kilo database** — the local Docker stack couldn't start (host ports
+5432/6379 held by another project; see the `local-db-port-conflict` note). Run
+`npm run prisma:migrate:deploy && npm run prisma:generate` once the kilo DB is reachable, then
+`npm run seed:permissions` is a no-op (no new keys) and `npm run seed:mock:reset` re-seeds with
+the new columns. No automated tests added — the repo has none.
+
 ---
 
 ## 3. Credentials & external setup checklist

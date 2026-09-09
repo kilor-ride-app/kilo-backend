@@ -98,6 +98,64 @@ export class SupportService {
     });
   }
 
+  // Single PATCH surface for the admin dashboard — assign, change
+  // priority, and/or transition status in one call. Terminal transitions
+  // route through the dedicated methods so their side effects (resolution
+  // message, escalation notification) still fire.
+  async adminUpdate(
+    ticketId: string,
+    actorId: string,
+    dto: {
+      status?: TicketStatus;
+      priority?: TicketPriority;
+      assignedToId?: string;
+      resolutionNote?: string;
+      resolvedById?: string;
+    },
+  ) {
+    await this.findTicketOrThrow(ticketId);
+
+    if (dto.assignedToId) {
+      await this.assertAssignee(dto.assignedToId);
+      await this.prisma.supportTicket.update({
+        where: { id: ticketId },
+        data: { assignedToId: dto.assignedToId },
+      });
+    }
+
+    if (dto.priority) {
+      await this.prisma.supportTicket.update({
+        where: { id: ticketId },
+        data: { priority: dto.priority },
+      });
+    }
+
+    if (dto.status === TicketStatus.RESOLVED || dto.status === TicketStatus.CLOSED) {
+      return this.resolve(ticketId, actorId, dto.resolutionNote, dto.resolvedById);
+    }
+    if (dto.status === TicketStatus.ESCALATED) {
+      return this.escalate(ticketId, actorId, dto.resolutionNote);
+    }
+    if (dto.status) {
+      return this.prisma.supportTicket.update({
+        where: { id: ticketId },
+        data: { status: dto.status },
+      });
+    }
+
+    return this.prisma.supportTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  }
+
+  private async assertAssignee(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!user || !STAFF_ROLES.includes(user.role)) {
+      throw new NotFoundException('assignedToId is not a support/admin user');
+    }
+  }
+
   async assign(ticketId: string, assignedToId: string) {
     await this.findTicketOrThrow(ticketId);
     return this.prisma.supportTicket.update({
@@ -133,8 +191,9 @@ export class SupportService {
     return updated;
   }
 
-  async resolve(ticketId: string, actorId: string, resolutionNote?: string) {
+  async resolve(ticketId: string, actorId: string, resolutionNote?: string, resolvedById?: string) {
     const ticket = await this.findTicketOrThrow(ticketId);
+    const resolver = resolvedById ?? actorId;
     const updated = await this.prisma.$transaction(async (tx) => {
       if (resolutionNote) {
         await tx.supportTicketMessage.create({
@@ -143,7 +202,7 @@ export class SupportService {
       }
       return tx.supportTicket.update({
         where: { id: ticketId },
-        data: { status: TicketStatus.RESOLVED, resolvedAt: new Date(), resolvedById: actorId },
+        data: { status: TicketStatus.RESOLVED, resolvedAt: new Date(), resolvedById: resolver },
       });
     });
 

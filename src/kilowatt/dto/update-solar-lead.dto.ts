@@ -1,15 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { SolarLeadStatus } from '@prisma/client';
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { PartialType } from '@nestjs/swagger';
+import { CreateSolarLeadDto } from './create-solar-lead.dto';
 
-export class UpdateSolarLeadDto {
-  @ApiProperty({ enum: SolarLeadStatus, required: false })
-  @IsOptional()
-  @IsEnum(SolarLeadStatus)
-  status?: SolarLeadStatus;
-
-  @ApiProperty({ required: false, description: 'Staff user ID to assign this lead to' })
-  @IsOptional()
-  @IsString()
-  assignedRepId?: string;
-}
+// All lead fields are editable from the dashboard (status change, reassign,
+// contact-detail corrections).
+export class UpdateSolarLeadDto extends PartialType(CreateSolarLeadDto) {}

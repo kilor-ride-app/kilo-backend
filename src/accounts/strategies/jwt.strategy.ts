@@ -19,6 +19,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   // instances). Endpoints that need a fresh view of the user (e.g. status
   // changes) fetch it explicitly instead of relying on token claims.
   validate(payload: JwtPayload): AuthenticatedUser {
-    return { userId: payload.sub, role: payload.role, phone: payload.phone };
+    return { userId: payload.sub, role: payload.role, phone: payload.phone, sid: payload.sid };
   }
 }
