@@ -221,6 +221,7 @@ model OtpCode {
   createdAt  DateTime  @default(now())
 
   @@index([userId, purpose])
+  @@index([codeHash])
   @@map("otp_codes")
 }
 

@@ -224,7 +224,7 @@ export class AuthService {
 
   async forgotPassword(identifier: string) {
     const genericMessage = {
-      message: 'If the account exists, a password reset code has been sent',
+      message: 'If the account exists, a password reset link has been sent',
     };
 
     const user = await this.findByIdentifier(identifier);
@@ -235,36 +235,51 @@ export class AuthService {
       return genericMessage;
     }
 
-    const code = await this.otp.generateAndStore(user.id, OtpPurpose.PASSWORD_RESET);
-    // Prefer email — a reset email costs nothing next to an SMS. Fall back
-    // to SMS only when there's no verified address to send to (phone-only
-    // accounts, or an email that was never confirmed).
+    // Prefer a reset link by email — it costs nothing next to an SMS and
+    // needs no code re-typing. Fall back to an SMS code only when there's
+    // no verified address to send a link to (phone-only accounts, or an
+    // email that was never confirmed).
     if (user.email && user.emailVerifiedAt) {
-      await this.email.sendPasswordResetCode(user.email, code);
+      const token = await this.otp.generateAndStoreToken(user.id, OtpPurpose.PASSWORD_RESET);
+      const resetUrl = `${this.config.get<string>('RESET_APP_URL') ?? 'http://localhost:5173'}/reset-password?token=${token}`;
+      await this.email.sendPasswordResetLink(user.email, resetUrl);
     } else {
+      const code = await this.otp.generateAndStore(user.id, OtpPurpose.PASSWORD_RESET);
       await this.sms.sendOtp(user.phone, code);
     }
     return genericMessage;
   }
 
-  async resetPassword(identifier: string, code: string, newPassword: string) {
-    const user = await this.findByIdentifier(identifier);
-    if (!user) {
-      throw new UnauthorizedException('Invalid code');
+  async resetPassword(dto: {
+    token?: string;
+    identifier?: string;
+    code?: string;
+    newPassword: string;
+  }) {
+    let userId: string;
+    if (dto.token) {
+      userId = await this.otp.verifyToken(OtpPurpose.PASSWORD_RESET, dto.token);
+    } else if (dto.identifier && dto.code) {
+      const user = await this.findByIdentifier(dto.identifier);
+      if (!user) {
+        throw new UnauthorizedException('Invalid code');
+      }
+      await this.otp.verify(user.id, OtpPurpose.PASSWORD_RESET, dto.code);
+      userId = user.id;
+    } else {
+      throw new BadRequestException('Provide either a reset token or an identifier and code');
     }
 
-    await this.otp.verify(user.id, OtpPurpose.PASSWORD_RESET, code);
-
-    const passwordHash = await argon2.hash(newPassword);
+    const passwordHash = await argon2.hash(dto.newPassword);
     await this.prisma.$transaction([
       this.prisma.user.update({
-        where: { id: user.id },
+        where: { id: userId },
         data: { passwordHash },
       }),
       // A password reset invalidates every existing session — anyone who
       // still holds a refresh token for this account is locked out.
       this.prisma.refreshToken.updateMany({
-        where: { userId: user.id, revokedAt: null },
+        where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },
       }),
     ]);

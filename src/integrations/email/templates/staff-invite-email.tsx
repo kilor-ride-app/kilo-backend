@@ -1,5 +1,5 @@
 import { Button, Text } from '@react-email/components';
-import { brand } from './brand';
+import { accent, brand } from './brand';
 import { EmailLayout } from './email-layout';
 
 interface StaffInviteEmailProps {
@@ -19,7 +19,7 @@ export function StaffInviteEmail({ roles, acceptUrl, expiresInDays }: StaffInvit
       <Button
         href={acceptUrl}
         style={{
-          backgroundColor: brand.primaryColor,
+          backgroundColor: accent.indigo,
           color: '#FFFFFF',
           borderRadius: 6,
           padding: '12px 24px',

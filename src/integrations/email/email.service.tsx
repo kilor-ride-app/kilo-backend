@@ -3,36 +3,48 @@ import { ConfigService } from '@nestjs/config';
 import { render } from '@react-email/render';
 import { BusinessTeamInviteEmail } from './templates/business-team-invite-email';
 import { GuarantorInviteEmail } from './templates/guarantor-invite-email';
-import { PasswordResetCodeEmail } from './templates/password-reset-code-email';
+import { PasswordResetLinkEmail } from './templates/password-reset-link-email';
 import { StaffInviteEmail } from './templates/staff-invite-email';
 import { VerificationCodeEmail } from './templates/verification-code-email';
 
 const RESEND_SEND_URL = 'https://api.resend.com/emails';
-const DEFAULT_FROM = 'Kilo <onboarding@resend.dev>'; // resend.dev works with no domain setup — swap once a real sending domain is verified in Resend
+
+// One sender identity per email purpose, all on the verified mail.kilo.ng
+// domain — so a security-sensitive email (password reset) doesn't arrive
+// looking identical to a routine invite in the inbox list. EMAIL_FROM, when
+// set, overrides all of these at once (useful for local/dev testing against
+// a single sandbox address).
+const FROM = {
+  verification: 'Kilo <hello@mail.kilo.ng>',
+  passwordReset: 'Kilo Security <security@mail.kilo.ng>',
+  invite: 'Kilo Team <invites@mail.kilo.ng>',
+  guarantor: 'Kilo <noreply@mail.kilo.ng>',
+  reports: 'Kilo Reports <reports@mail.kilo.ng>',
+} as const;
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
   private readonly apiKey?: string;
-  private readonly from: string;
+  private readonly fromOverride?: string;
 
   constructor(private readonly config: ConfigService) {
     this.apiKey = this.config.get<string>('RESEND_API_KEY') || undefined;
-    this.from = this.config.get<string>('EMAIL_FROM') || DEFAULT_FROM;
+    this.fromOverride = this.config.get<string>('EMAIL_FROM') || undefined;
   }
 
   async sendVerificationCode(to: string, code: string, expiresInMinutes = 10): Promise<void> {
     const html = await render(
       <VerificationCodeEmail code={code} expiresInMinutes={expiresInMinutes} />,
     );
-    await this.dispatch(to, 'Verify your Kilo email', html);
+    await this.dispatch(FROM.verification, to, 'Verify your Kilo email', html);
   }
 
-  async sendPasswordResetCode(to: string, code: string, expiresInMinutes = 10): Promise<void> {
+  async sendPasswordResetLink(to: string, resetUrl: string, expiresInMinutes = 30): Promise<void> {
     const html = await render(
-      <PasswordResetCodeEmail code={code} expiresInMinutes={expiresInMinutes} />,
+      <PasswordResetLinkEmail resetUrl={resetUrl} expiresInMinutes={expiresInMinutes} />,
     );
-    await this.dispatch(to, 'Reset your Kilo password', html);
+    await this.dispatch(FROM.passwordReset, to, 'Reset your Kilo password', html);
   }
 
   async sendStaffInvite(
@@ -44,7 +56,7 @@ export class EmailService {
     const html = await render(
       <StaffInviteEmail roles={roles} acceptUrl={acceptUrl} expiresInDays={expiresInDays} />,
     );
-    await this.dispatch(to, "You've been invited to join Kilo", html);
+    await this.dispatch(FROM.invite, to, "You've been invited to join Kilo", html);
   }
 
   async sendBusinessTeamInvite(
@@ -60,7 +72,7 @@ export class EmailService {
         expiresInDays={expiresInDays}
       />,
     );
-    await this.dispatch(to, `You've been invited to join ${businessName}`, html);
+    await this.dispatch(FROM.invite, to, `You've been invited to join ${businessName}`, html);
   }
 
   async sendGuarantorInvite(
@@ -76,7 +88,7 @@ export class EmailService {
         expiresInDays={expiresInDays}
       />,
     );
-    await this.dispatch(to, `${driverName} has listed you as a guarantor`, html);
+    await this.dispatch(FROM.guarantor, to, `${driverName} has listed you as a guarantor`, html);
   }
 
   // Used by ReportsProcessor to deliver a scheduled report — attachment
@@ -88,12 +100,13 @@ export class EmailService {
     html: string,
     attachment: { filename: string; content: Buffer },
   ): Promise<void> {
-    await this.dispatch(to, subject, html, [
+    await this.dispatch(FROM.reports, to, subject, html, [
       { filename: attachment.filename, content: attachment.content.toString('base64') },
     ]);
   }
 
   private async dispatch(
+    from: string,
     to: string,
     subject: string,
     html: string,
@@ -113,7 +126,7 @@ export class EmailService {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
-        from: this.from,
+        from: this.fromOverride ?? from,
         to,
         subject,
         html,

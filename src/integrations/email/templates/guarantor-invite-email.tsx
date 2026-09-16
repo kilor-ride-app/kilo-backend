@@ -1,5 +1,5 @@
 import { Button, Text } from '@react-email/components';
-import { brand } from './brand';
+import { accent, brand } from './brand';
 import { EmailLayout } from './email-layout';
 
 interface GuarantorInviteEmailProps {
@@ -22,7 +22,7 @@ export function GuarantorInviteEmail({
       <Button
         href={submitUrl}
         style={{
-          backgroundColor: brand.primaryColor,
+          backgroundColor: accent.teal,
           color: '#FFFFFF',
           borderRadius: 6,
           padding: '12px 24px',

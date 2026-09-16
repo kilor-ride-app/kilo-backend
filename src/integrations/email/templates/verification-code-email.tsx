@@ -1,5 +1,5 @@
 import { Section, Text } from '@react-email/components';
-import { brand } from './brand';
+import { accent, brand } from './brand';
 import { EmailLayout } from './email-layout';
 
 interface VerificationCodeEmailProps {
@@ -27,7 +27,7 @@ export function VerificationCodeEmail({ code, expiresInMinutes }: VerificationCo
             fontSize: 32,
             fontWeight: 700,
             letterSpacing: 8,
-            color: brand.primaryColor,
+            color: accent.indigo,
             margin: 0,
           }}
         >
