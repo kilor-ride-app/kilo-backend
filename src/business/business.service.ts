@@ -20,10 +20,16 @@ import { AuditService } from '../audit/audit.service';
 import { EmailService } from '../integrations/email/email.service';
 import { AuthService, TokenPair } from '../accounts/auth.service';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
+import { describeFilters, resolveActorName } from '../common/export/export-helpers';
+import { EXPORT_MAX_ROWS, ExportDocument } from '../common/export/export.types';
 import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
-import { CreditStatus, ListBusinessesQueryDto } from './dto/list-businesses-query.dto';
+import {
+  CreditStatus,
+  ExportBusinessesQueryDto,
+  ListBusinessesQueryDto,
+} from './dto/list-businesses-query.dto';
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -264,6 +270,108 @@ export class BusinessService {
     ]);
 
     return toPaginated(await this.annotateCredit(rows), total, query);
+  }
+
+  async exportBusinesses(
+    query: ExportBusinessesQueryDto,
+    actorId: string,
+  ): Promise<ExportDocument> {
+    const [page, generatedBy] = await Promise.all([
+      this.listAllBusinesses({ ...query, take: EXPORT_MAX_ROWS, skip: 0 }),
+      resolveActorName(this.prisma, actorId),
+    ]);
+    const rows = page.data;
+    const n = (fn: (r: (typeof rows)[number]) => boolean) => rows.filter(fn).length;
+    const sum = (fn: (r: (typeof rows)[number]) => Prisma.Decimal) =>
+      rows.reduce((acc, r) => acc + fn(r).toNumber(), 0);
+
+    return {
+      title: 'Business Accounts Report',
+      subtitle: 'Business accounts with credit limits, outstanding balances and usage',
+      generatedBy,
+      filters: describeFilters({
+        Search: query.search,
+        'Account status': query.status,
+        'Credit status': query.creditStatus,
+      }),
+      summary: [
+        {
+          label: 'Total businesses',
+          value: page.total,
+          format: 'integer',
+          note: 'Businesses matching the filters.',
+        },
+        {
+          label: 'Active',
+          value: n((r) => r.status === BusinessStatus.ACTIVE),
+          format: 'integer',
+          tone: 'good',
+          note: 'Account status ACTIVE.',
+        },
+        {
+          label: 'Suspended',
+          value: n((r) => r.status === BusinessStatus.SUSPENDED),
+          format: 'integer',
+          tone: 'bad',
+          note: 'Account status SUSPENDED.',
+        },
+        {
+          label: 'Overdue',
+          value: n((r) => r.creditStatus === 'OVERDUE'),
+          format: 'integer',
+          tone: 'bad',
+          note: 'At least one invoice is past due.',
+        },
+        {
+          label: 'On credit',
+          value: n((r) => r.creditStatus === 'ON_CREDIT'),
+          format: 'integer',
+          tone: 'warn',
+          note: 'Carrying an outstanding balance, nothing overdue.',
+        },
+        {
+          label: 'Credit extended',
+          value: sum((r) => r.creditLimit),
+          format: 'currency',
+          tone: 'info',
+          note: 'Sum of credit limits.',
+        },
+        {
+          label: 'Outstanding balance',
+          value: sum((r) => r.outstanding),
+          format: 'currency',
+          tone: 'warn',
+          note: 'Sum of what businesses currently owe on credit.',
+        },
+      ],
+      sections: [
+        {
+          name: 'Businesses',
+          description: 'One row per business account, newest first.',
+          truncatedFrom: page.total > rows.length ? page.total : undefined,
+          columns: [
+            { key: 'name', header: 'Business', width: 28 },
+            { key: 'registrationNumber', header: 'Reg. no.', width: 16 },
+            { key: 'contactEmail', header: 'Contact email', width: 30 },
+            { key: 'contactPhone', header: 'Contact phone', width: 16 },
+            { key: 'status', header: 'Status', format: 'status' },
+            { key: 'creditStatus', header: 'Credit status', format: 'status' },
+            { key: 'creditLimit', header: 'Credit limit', format: 'currency', total: true },
+            { key: 'outstanding', header: 'Outstanding', format: 'currency', total: true },
+            { key: 'members', header: 'Team members', format: 'integer' },
+            { key: 'deliveries', header: 'Deliveries', format: 'integer', total: true },
+            { key: 'invoices', header: 'Invoices', format: 'integer', total: true },
+            { key: 'createdAt', header: 'Created', format: 'date' },
+          ],
+          rows: rows.map((r) => ({
+            ...r,
+            members: r._count.members,
+            deliveries: r._count.deliveries,
+            invoices: r._count.invoices,
+          })),
+        },
+      ],
+    };
   }
 
   // Adds `outstanding` (BUSINESS_CREDIT_PAYABLE balance) and a derived

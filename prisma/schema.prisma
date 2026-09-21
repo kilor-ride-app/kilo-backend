@@ -1355,13 +1355,13 @@ enum ReportType {
   SUPPORT
 }
 
-// PDF is intentionally not implemented in this pass — ReportsService
-// rejects it with a clear error rather than faking a render. Kept in the
-// enum (matching the plan's literal "CSV/PDF" wording) so the gap is
-// visible in the API surface, not hidden by omission.
+// XLSX is the rich format (summary sheet, colour, filters); PDF is the
+// print/share format; CSV is the bare machine-readable data. All three are
+// rendered by common/export from one ExportDocument.
 enum ReportFormat {
   CSV
   PDF
+  XLSX
 }
 
 enum ScheduleFrequency {

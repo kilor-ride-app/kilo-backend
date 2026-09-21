@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { AccountType, Prisma, ReferralRedemptionStatus, UserRole } from '@prisma/client';
 import { randomInt } from 'crypto';
+import { toPaginated } from '../common/utils/paginate.util';
+import { tallyByStatus } from '../common/utils/tally.util';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -112,12 +114,29 @@ export class ReferralsService {
   }
 
   async listAll(status?: ReferralRedemptionStatus, take = 50, skip = 0) {
-    return this.prisma.referralRedemption.findMany({
-      where: status ? { status } : {},
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-    });
+    const where = status ? { status } : {};
+    const [data, total, byStatus] = await Promise.all([
+      this.prisma.referralRedemption.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.referralRedemption.count({ where }),
+      this.prisma.referralRedemption.groupBy({ by: ['status'], _count: true }),
+    ]);
+    const t = tallyByStatus(byStatus);
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      {
+        total: t.total,
+        pending: t[ReferralRedemptionStatus.PENDING] ?? 0,
+        qualified: t[ReferralRedemptionStatus.QUALIFIED] ?? 0,
+        paid: t[ReferralRedemptionStatus.PAID] ?? 0,
+      },
+    );
   }
 
   // Pays out every QUALIFIED-but-unpaid redemption in one pass.

@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { KycDocumentType, KycStatus, KycVerificationType } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { R2Service } from '../integrations/r2/r2.service';
@@ -136,23 +137,45 @@ export class KycService {
     return { rejected: result.count };
   }
 
+  // The review queue: one row per driver with documents awaiting review,
+  // oldest submission first (FIFO — also what keeps paging stable).
   async listPending(take = 50, skip = 0) {
-    const driverIds = await this.prisma.kycDocument.findMany({
-      where: { status: KycStatus.PENDING },
-      distinct: ['driverId'],
-      select: { driverId: true },
-      take,
-      skip,
-    });
-    if (driverIds.length === 0) {
-      return [];
-    }
+    const where = { status: KycStatus.PENDING };
+    const [groups, allDrivers, pendingDocuments] = await Promise.all([
+      this.prisma.kycDocument.groupBy({
+        by: ['driverId'],
+        where,
+        _count: true,
+        _min: { createdAt: true },
+        orderBy: { _min: { createdAt: 'asc' } },
+        take,
+        skip,
+      }),
+      this.prisma.kycDocument.groupBy({ by: ['driverId'], where }),
+      this.prisma.kycDocument.count({ where }),
+    ]);
 
-    const drivers = await this.prisma.user.findMany({
-      where: { id: { in: driverIds.map((d) => d.driverId) } },
-      select: { id: true, firstName: true, lastName: true, phone: true, email: true },
+    const users = groups.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: groups.map((g) => g.driverId) } },
+          select: { id: true, firstName: true, lastName: true, phone: true, email: true },
+        })
+      : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+
+    const data = groups.flatMap((g) => {
+      const user = byId.get(g.driverId);
+      return user ? [{ ...user, pendingDocuments: g._count, submittedAt: g._min.createdAt }] : [];
     });
-    return drivers;
+    return toPaginated(
+      data,
+      allDrivers.length,
+      { take, skip },
+      {
+        pendingDrivers: allDrivers.length,
+        pendingDocuments,
+      },
+    );
   }
 
   async getSignedDocumentUrl(documentId: string) {

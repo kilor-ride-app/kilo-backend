@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, SolarAssessment, SolarLeadStatus } from '@prisma/client';
+import { toPaginated } from '../common/utils/paginate.util';
+import { tallyByStatus } from '../common/utils/tally.util';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface CreateLeadInput {
@@ -59,17 +61,28 @@ export class SolarAssessmentsService {
   }
 
   async listLeads(status?: SolarLeadStatus, take = 50, skip = 0) {
-    const leads = await this.prisma.solarAssessment.findMany({
-      where: status ? { status } : {},
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-      include: {
-        assignedRep: { select: { id: true, firstName: true, lastName: true } },
-        user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-      },
-    });
-    return leads.map(toSolarLeadView);
+    const where = status ? { status } : {};
+    const [leads, total, byStatus] = await Promise.all([
+      this.prisma.solarAssessment.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+        include: {
+          assignedRep: { select: { id: true, firstName: true, lastName: true } },
+          user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+        },
+      }),
+      this.prisma.solarAssessment.count({ where }),
+      this.prisma.solarAssessment.groupBy({ by: ['status'], _count: true }),
+    ]);
+    const { total: all, ...counts } = tallyByStatus(byStatus);
+    return toPaginated(
+      leads.map(toSolarLeadView),
+      total,
+      { take, skip },
+      { total: all, byStatus: counts },
+    );
   }
 
   async createLead(dto: CreateLeadInput) {

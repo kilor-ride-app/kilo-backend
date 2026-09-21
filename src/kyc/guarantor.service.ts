@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GuarantorStatus } from '@prisma/client';
+import { toPaginated } from '../common/utils/paginate.util';
+import { tallyByStatus } from '../common/utils/tally.util';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
 import { EmailService } from '../integrations/email/email.service';
 import { R2Service } from '../integrations/r2/r2.service';
@@ -205,13 +207,31 @@ export class GuarantorService {
   }
 
   async listPending(status?: GuarantorStatus, take = 50, skip = 0) {
-    return this.prisma.guarantor.findMany({
-      where: status ? { status } : { status: GuarantorStatus.SUBMITTED },
-      orderBy: { createdAt: 'desc' },
-      select: GUARANTOR_SELECT,
-      take,
-      skip,
-    });
+    const where = status ? { status } : { status: GuarantorStatus.SUBMITTED };
+    const [data, total, byStatus] = await Promise.all([
+      this.prisma.guarantor.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        select: GUARANTOR_SELECT,
+        take,
+        skip,
+      }),
+      this.prisma.guarantor.count({ where }),
+      this.prisma.guarantor.groupBy({ by: ['status'], _count: true }),
+    ]);
+    const t = tallyByStatus(byStatus);
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      {
+        total: t.total,
+        invited: t[GuarantorStatus.INVITED] ?? 0,
+        submitted: t[GuarantorStatus.SUBMITTED] ?? 0,
+        verified: t[GuarantorStatus.VERIFIED] ?? 0,
+        rejected: t[GuarantorStatus.REJECTED] ?? 0,
+      },
+    );
   }
 
   async approve(id: string, reviewerId: string) {

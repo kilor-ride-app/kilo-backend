@@ -1,6 +1,7 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType, OmitType } from '@nestjs/swagger';
 import { BusinessStatus } from '@prisma/client';
 import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
+import { ExportFormatDto } from '../../common/export/export-format.dto';
 import { PaginationDto } from '../../wallet/dto/pagination.dto';
 
 export const CREDIT_STATUSES = ['OVERDUE', 'ON_CREDIT', 'NO_CREDIT'] as const;
@@ -26,3 +27,8 @@ export class ListBusinessesQueryDto extends PaginationDto {
   @IsIn(CREDIT_STATUSES)
   creditStatus?: CreditStatus;
 }
+
+export class ExportBusinessesQueryDto extends IntersectionType(
+  OmitType(ListBusinessesQueryDto, ['take', 'skip'] as const),
+  ExportFormatDto,
+) {}

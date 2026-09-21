@@ -1,6 +1,7 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType, OmitType } from '@nestjs/swagger';
 import { TransactionStatus } from '@prisma/client';
 import { IsEnum, IsOptional } from 'class-validator';
+import { ExportFormatDto } from '../../common/export/export-format.dto';
 import { PaginationDto } from './pagination.dto';
 
 export class ListWithdrawalsQueryDto extends PaginationDto {
@@ -13,3 +14,8 @@ export class ListWithdrawalsQueryDto extends PaginationDto {
   @IsEnum(TransactionStatus)
   status?: TransactionStatus;
 }
+
+export class ExportWithdrawalsQueryDto extends IntersectionType(
+  OmitType(ListWithdrawalsQueryDto, ['take', 'skip'] as const),
+  ExportFormatDto,
+) {}

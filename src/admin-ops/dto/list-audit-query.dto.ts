@@ -1,6 +1,7 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType, OmitType } from '@nestjs/swagger';
 import { IsOptional, IsString } from 'class-validator';
 import { DateRangeQueryDto } from '../../common/dto/date-range-query.dto';
+import { ExportFormatDto } from '../../common/export/export-format.dto';
 
 export class ListAuditQueryDto extends DateRangeQueryDto {
   @ApiProperty({ required: false, example: 'user.suspend' })
@@ -18,3 +19,8 @@ export class ListAuditQueryDto extends DateRangeQueryDto {
   @IsString()
   actorId?: string;
 }
+
+export class ExportAuditQueryDto extends IntersectionType(
+  OmitType(ListAuditQueryDto, ['take', 'skip'] as const),
+  ExportFormatDto,
+) {}

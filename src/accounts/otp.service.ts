@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { generateSecureToken, hashToken } from '../common/utils/token.util';
 import { OtpPurpose } from './types/otp-purpose.enum';
@@ -79,18 +80,79 @@ export class OtpService {
     return token;
   }
 
-  async verifyToken(purpose: OtpPurpose, token: string): Promise<string> {
+  // ── Two-step consumption, for flows that must act before burning ────
+  //
+  // The password-reset flow can't use verify()/consume-on-read: it has to
+  // (1) check the credential, (2) save the new password, and only then burn
+  // the credential — all-or-nothing, and safe when the same link arrives
+  // twice at once. So it's split: find* checks without consuming (a wrong
+  // code still counts an attempt), claim() burns it atomically inside the
+  // caller's transaction, consumeAll() kills whatever else is outstanding.
+  // Every failure is a plain null — the caller decides how (uniformly) to
+  // report it, so nothing here leaks *why* a credential was rejected.
+
+  /** A live (unconsumed, unexpired) link token's row, or null. Does not consume. */
+  async findLiveToken(
+    purpose: OtpPurpose,
+    token: string,
+  ): Promise<{ id: string; userId: string } | null> {
     const otp = await this.prisma.otpCode.findFirst({
       where: { purpose, codeHash: hashToken(token), consumedAt: null },
     });
     if (!otp || otp.expiresAt < new Date()) {
-      throw new UnauthorizedException('Invalid or expired link — request a new one');
+      return null;
     }
+    return { id: otp.id, userId: otp.userId };
+  }
 
-    await this.prisma.otpCode.update({
-      where: { id: otp.id },
+  /**
+   * The user's latest live numeric code's row if `code` matches, else null.
+   * Does not consume; a wrong guess still counts toward the attempt limit.
+   */
+  async findLiveCode(
+    userId: string,
+    purpose: OtpPurpose,
+    code: string,
+  ): Promise<{ id: string } | null> {
+    const otp = await this.prisma.otpCode.findFirst({
+      where: { userId, purpose, consumedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!otp || otp.attempts >= OTP_MAX_ATTEMPTS || otp.expiresAt < new Date()) {
+      return null;
+    }
+    if (otp.codeHash !== hashToken(code)) {
+      await this.prisma.otpCode.update({
+        where: { id: otp.id },
+        data: { attempts: { increment: 1 } },
+      });
+      return null;
+    }
+    return { id: otp.id };
+  }
+
+  /**
+   * Burns one credential. The `consumedAt: null` guard lives in the UPDATE
+   * itself, so when two requests race on the same link exactly one gets
+   * `true` — the other's UPDATE matches no row.
+   */
+  async claim(db: Prisma.TransactionClient, id: string): Promise<boolean> {
+    const { count } = await db.otpCode.updateMany({
+      where: { id, consumedAt: null, expiresAt: { gt: new Date() } },
       data: { consumedAt: new Date() },
     });
-    return otp.userId;
+    return count === 1;
+  }
+
+  /** Kills every still-outstanding credential of this purpose for the user. */
+  async consumeAll(
+    db: Prisma.TransactionClient,
+    userId: string,
+    purpose: OtpPurpose,
+  ): Promise<void> {
+    await db.otpCode.updateMany({
+      where: { userId, purpose, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
   }
 }

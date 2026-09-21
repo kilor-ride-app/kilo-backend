@@ -17,6 +17,8 @@ async function bootstrap() {
   app.enableCors({
     origin: (process.env.CORS_ORIGINS ?? '').split(',').filter(Boolean),
     credentials: true,
+    // Lets the dashboard read the download filename off export responses.
+    exposedHeaders: ['Content-Disposition'],
   });
 
   // Reject any request body that doesn't match its DTO — first line of

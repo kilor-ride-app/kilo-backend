@@ -7,9 +7,14 @@ export class ExportReportDto {
   @IsEnum(ReportType)
   type: ReportType;
 
-  @ApiProperty({ enum: ReportFormat, default: ReportFormat.CSV })
+  @ApiProperty({
+    enum: ReportFormat,
+    default: ReportFormat.XLSX,
+    description: 'XLSX = formatted workbook, PDF = printable report, CSV = raw metrics',
+  })
+  @IsOptional()
   @IsEnum(ReportFormat)
-  format: ReportFormat;
+  format: ReportFormat = ReportFormat.XLSX;
 
   @ApiProperty({ required: false })
   @IsOptional()

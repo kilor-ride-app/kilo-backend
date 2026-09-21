@@ -8,10 +8,12 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
+import type { Response } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -19,14 +21,15 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../common/guards/permissions.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AnalyticsRangeDto } from '../common/dto/analytics-range.dto';
+import { sendExport } from '../common/export/export.util';
 import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
 import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { AdminOpsService } from './admin-ops.service';
 import { AnalyticsService } from './analytics.service';
-import { ListAuditQueryDto } from './dto/list-audit-query.dto';
+import { ExportAuditQueryDto, ListAuditQueryDto } from './dto/list-audit-query.dto';
 import { LiveMapQueryDto } from './dto/live-map-query.dto';
-import { ListDriversQueryDto } from './dto/list-drivers-query.dto';
-import { ListUsersQueryDto } from './dto/list-users-query.dto';
+import { ExportDriversQueryDto, ListDriversQueryDto } from './dto/list-drivers-query.dto';
+import { ExportUsersQueryDto, ListUsersQueryDto } from './dto/list-users-query.dto';
 import { SuspendUserDto } from './dto/suspend-user.dto';
 
 @ApiTags('admin-ops')
@@ -76,6 +79,18 @@ export class AdminOpsController {
     return this.adminOps.listRiders(query);
   }
 
+  // Static segment — must stay above `riders/:id`.
+  @RequirePermissions('admin.users.manage')
+  @Get('riders/export')
+  async exportRiders(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ExportUsersQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const doc = await this.adminOps.exportRiders(query, user.userId);
+    return sendExport(res, doc, query.format, 'riders');
+  }
+
   @RequirePermissions('admin.users.manage')
   @Get('riders/:id')
   getRiderDetail(@Param('id') id: string) {
@@ -122,6 +137,18 @@ export class AdminOpsController {
   @Get('drivers')
   listDrivers(@Query() query: ListDriversQueryDto) {
     return this.adminOps.listDrivers(query);
+  }
+
+  // Static segment — must stay above `drivers/:id`.
+  @RequirePermissions('admin.users.manage')
+  @Get('drivers/export')
+  async exportDrivers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ExportDriversQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const doc = await this.adminOps.exportDrivers(query, user.userId);
+    return sendExport(res, doc, query.format, 'drivers');
   }
 
   @RequirePermissions('admin.users.manage')
@@ -186,6 +213,17 @@ export class AdminOpsController {
   @Patch('config')
   updateConfig(@CurrentUser() user: AuthenticatedUser, @Body() updates: Record<string, unknown>) {
     return this.adminOps.updateConfig(updates, user.userId);
+  }
+
+  @RequirePermissions('admin.audit.view')
+  @Get('audit-logs/export')
+  async exportAuditLogs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ExportAuditQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const doc = await this.adminOps.exportAuditLogs(query, user.userId);
+    return sendExport(res, doc, query.format, 'audit-log');
   }
 
   @RequirePermissions('admin.audit.view')

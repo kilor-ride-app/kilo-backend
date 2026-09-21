@@ -250,39 +250,73 @@ export class AuthService {
     return genericMessage;
   }
 
+  // Mirrors forgotPassword's stance: whatever is wrong with the link/code
+  // (unknown account, social-only account, nothing pending, wrong, expired,
+  // already used, too many attempts) the caller gets the SAME response, so
+  // this route can't be used to probe which accounts exist or have a reset
+  // in flight.
   async resetPassword(dto: {
     token?: string;
     identifier?: string;
     code?: string;
     newPassword: string;
   }) {
-    let userId: string;
-    if (dto.token) {
-      userId = await this.otp.verifyToken(OtpPurpose.PASSWORD_RESET, dto.token);
-    } else if (dto.identifier && dto.code) {
-      const user = await this.findByIdentifier(dto.identifier);
-      if (!user) {
-        throw new UnauthorizedException('Invalid code');
-      }
-      await this.otp.verify(user.id, OtpPurpose.PASSWORD_RESET, dto.code);
-      userId = user.id;
-    } else {
+    if (!dto.token && !(dto.identifier && dto.code)) {
       throw new BadRequestException('Provide either a reset token or an identifier and code');
     }
+    const invalid = () =>
+      new UnauthorizedException('Invalid or expired reset link or code — request a new one');
 
+    // Hash before looking anything up: the slow step runs for every request,
+    // so response time doesn't reveal whether the account exists.
     const passwordHash = await argon2.hash(dto.newPassword);
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: userId },
-        data: { passwordHash },
-      }),
+
+    // Check the credential WITHOUT burning it yet.
+    let found: { id: string; userId: string } | null = null;
+    if (dto.token) {
+      found = await this.otp.findLiveToken(OtpPurpose.PASSWORD_RESET, dto.token);
+    } else {
+      const account = await this.findByIdentifier(dto.identifier!);
+      const live = account
+        ? await this.otp.findLiveCode(account.id, OtpPurpose.PASSWORD_RESET, dto.code!)
+        : null;
+      found = account && live ? { id: live.id, userId: account.id } : null;
+    }
+    if (!found) {
+      throw invalid();
+    }
+
+    // Social-only accounts have no password to reset (forgotPassword never
+    // issues them a link) — refuse here too rather than mint one.
+    const user = await this.prisma.user.findUnique({
+      where: { id: found.userId },
+      select: { passwordHash: true },
+    });
+    if (!user?.passwordHash) {
+      throw invalid();
+    }
+
+    // Burn the credential, set the password and revoke sessions as ONE unit:
+    // claim() is atomic, so a link used twice at once works exactly once,
+    // and if saving fails the claim rolls back — the user's link survives
+    // for a retry instead of being burned by a transient error.
+    const credentialId = found.id;
+    const userId = found.userId;
+    await this.prisma.$transaction(async (tx) => {
+      if (!(await this.otp.claim(tx, credentialId))) {
+        throw invalid();
+      }
+      await tx.user.update({ where: { id: userId }, data: { passwordHash } });
       // A password reset invalidates every existing session — anyone who
-      // still holds a refresh token for this account is locked out.
-      this.prisma.refreshToken.updateMany({
+      // still holds a refresh token for this account is locked out...
+      await tx.refreshToken.updateMany({
         where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },
-      }),
-    ]);
+      });
+      // ...and every other reset link/code still in flight, so an older
+      // email in the inbox can't be used to change the password again.
+      await this.otp.consumeAll(tx, userId, OtpPurpose.PASSWORD_RESET);
+    });
 
     return { message: 'Password has been reset — please log in with your new password' };
   }

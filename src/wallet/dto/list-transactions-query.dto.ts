@@ -1,7 +1,8 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType, OmitType } from '@nestjs/swagger';
 import { TransactionStatus, TransactionType } from '@prisma/client';
 import { IsEnum, IsOptional, IsString } from 'class-validator';
 import { DateRangeQueryDto } from '../../common/dto/date-range-query.dto';
+import { ExportFormatDto } from '../../common/export/export-format.dto';
 
 export class ListTransactionsQueryDto extends DateRangeQueryDto {
   @ApiProperty({ enum: TransactionType, required: false })
@@ -19,3 +20,8 @@ export class ListTransactionsQueryDto extends DateRangeQueryDto {
   @IsString()
   search?: string;
 }
+
+export class ExportTransactionsQueryDto extends IntersectionType(
+  OmitType(ListTransactionsQueryDto, ['take', 'skip'] as const),
+  ExportFormatDto,
+) {}

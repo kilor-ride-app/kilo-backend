@@ -13,15 +13,24 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { dateFilter } from '../common/dto/date-range-query.dto';
+import {
+  describeFilters,
+  fullName,
+  periodOf,
+  resolveActorName,
+} from '../common/export/export-helpers';
+import { EXPORT_MAX_ROWS, ExportDocument } from '../common/export/export.types';
 import { toPaginated } from '../common/utils/paginate.util';
+import { tallyByStatus } from '../common/utils/tally.util';
 import { startOfUtcDay } from '../common/utils/time-bucket.util';
-import { ListAuditQueryDto } from './dto/list-audit-query.dto';
+import { ExportAuditQueryDto, ListAuditQueryDto } from './dto/list-audit-query.dto';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { WalletService } from '../wallet/wallet.service';
-import { ListDriversQueryDto } from './dto/list-drivers-query.dto';
-import { ListUsersQueryDto } from './dto/list-users-query.dto';
+import { ExportDriversQueryDto, ListDriversQueryDto } from './dto/list-drivers-query.dto';
+import { ExportUsersQueryDto, ListUsersQueryDto } from './dto/list-users-query.dto';
 
 // Same key DispatchService GEOADDs live driver positions into — duplicated
 // here rather than importing DispatchService, since AdminOps only ever
@@ -120,15 +129,31 @@ const DELIVERY_LIST_SELECT = {
   completedAt: true,
 } as const;
 
-// groupBy rows -> { STATUS: count, ..., total }
-function tallyByStatus(rows: Array<{ status: string; _count: number }>) {
-  const out: Record<string, number> = {};
-  let total = 0;
-  for (const r of rows) {
-    out[r.status] = r._count;
-    total += r._count;
-  }
-  return { ...out, total };
+// Summary block shared by the ride/delivery history routes. A rider sees what
+// they spent; a driver what they earned (fare minus platform commission) —
+// both over COMPLETED trips only.
+function historySummary(
+  party: 'rider' | 'driver',
+  total: number,
+  byStatus: Array<{ status: string; _count: number }>,
+  settled: { finalFare: Prisma.Decimal | null; commissionAmount: Prisma.Decimal | null },
+) {
+  const counts = tallyByStatus(byStatus);
+  delete counts.total; // the by-status breakdown excludes the grand total
+  const gross = settled.finalFare ?? new Prisma.Decimal(0);
+  const commission = settled.commissionAmount ?? new Prisma.Decimal(0);
+  return {
+    total,
+    completed: counts.COMPLETED ?? 0,
+    cancelled: counts.CANCELLED ?? 0,
+    byStatus: counts,
+    ...(party === 'rider'
+      ? { totalSpent: decimalToFixed(gross) }
+      : {
+          totalEarnings: decimalToFixed(gross.minus(commission)),
+          totalCommission: decimalToFixed(commission),
+        }),
+  };
 }
 
 @Injectable()
@@ -493,12 +518,143 @@ export class AdminOpsService {
   // ── Lists ─────────────────────────────────────────────────────────────
 
   async listRiders(query: ListUsersQueryDto) {
+    const where = this.userListWhere(UserRole.RIDER, query);
+    const [riders, total, summary] = await Promise.all([
+      this.riderRows(where, query.take ?? 50, query.skip ?? 0),
+      this.prisma.user.count({ where }),
+      this.riderSummary(),
+    ]);
+    return toPaginated(riders, total, query, summary);
+  }
+
+  async listDrivers(query: ListDriversQueryDto) {
+    const where = await this.driverListWhere(query);
+    const [drivers, total, summary] = await Promise.all([
+      this.driverRows(where, query.take ?? 50, query.skip ?? 0),
+      this.prisma.user.count({ where }),
+      this.driverSummary(),
+    ]);
+    return toPaginated(drivers, total, query, summary);
+  }
+
+  /** Platform-wide rider counts for the stat cards — independent of page/filters. */
+  async riderSummary() {
+    const day = 24 * 60 * 60 * 1000;
+    const role = UserRole.RIDER;
+    const [byStatus, newLast7Days, newLast30Days, wallets] = await Promise.all([
+      this.prisma.user.groupBy({ by: ['status'], where: { role }, _count: true }),
+      this.prisma.user.count({
+        where: { role, createdAt: { gte: new Date(Date.now() - 7 * day) } },
+      }),
+      this.prisma.user.count({
+        where: { role, createdAt: { gte: new Date(Date.now() - 30 * day) } },
+      }),
+      this.prisma.account.aggregate({
+        where: { type: AccountType.RIDER_WALLET },
+        _sum: { balance: true },
+      }),
+    ]);
+    const status = tallyByStatus(byStatus);
+    return {
+      total: status.total,
+      active: status[UserStatus.ACTIVE] ?? 0,
+      suspended: status[UserStatus.SUSPENDED] ?? 0,
+      pendingVerification: status[UserStatus.PENDING_VERIFICATION] ?? 0,
+      newLast7Days,
+      newLast30Days,
+      totalWalletBalance: decimalToFixed(wallets._sum.balance),
+    };
+  }
+
+  /**
+   * Platform-wide driver counts for the stat cards — independent of
+   * page/filters. `online` counts every driver not OFFLINE (available +
+   * on a trip), the same definition as the dashboard's online figure.
+   */
+  async driverSummary() {
+    const day = 24 * 60 * 60 * 1000;
+    const role = UserRole.DRIVER;
+    const [byStatus, byAvailability, kycStates, newLast30Days] = await Promise.all([
+      this.prisma.user.groupBy({ by: ['status'], where: { role }, _count: true }),
+      this.prisma.driverStatus.groupBy({
+        by: ['availability'],
+        where: { user: { role } },
+        _count: true,
+      }),
+      this.driverKycStates(),
+      this.prisma.user.count({
+        where: { role, createdAt: { gte: new Date(Date.now() - 30 * day) } },
+      }),
+    ]);
+
+    const status = tallyByStatus(byStatus);
+    const availability = tallyByStatus(
+      byAvailability.map((a) => ({ status: a.availability, _count: a._count })),
+    );
+    const available = availability[DriverAvailability.ONLINE] ?? 0;
+    const onTrip = availability[DriverAvailability.ON_TRIP] ?? 0;
+
+    let pendingKyc = 0;
+    let approvedKyc = 0;
+    let rejectedKyc = 0;
+    for (const state of kycStates.values()) {
+      if (state === 'PENDING') pendingKyc++;
+      else if (state === 'REJECTED') rejectedKyc++;
+      else approvedKyc++;
+    }
+
+    return {
+      total: status.total,
+      online: available + onTrip,
+      available,
+      onTrip,
+      // A driver with no driver_statuses row has never gone online.
+      offline: Math.max(0, status.total - available - onTrip),
+      pendingKyc,
+      approvedKyc,
+      rejectedKyc,
+      kycNotSubmitted: Math.max(0, status.total - kycStates.size),
+      active: status[UserStatus.ACTIVE] ?? 0,
+      suspended: status[UserStatus.SUSPENDED] ?? 0,
+      pendingVerification: status[UserStatus.PENDING_VERIFICATION] ?? 0,
+      newLast30Days,
+    };
+  }
+
+  /**
+   * KYC review state per driver, from the LATEST document of each type (a
+   * resubmission supersedes an earlier rejection). PENDING wins over
+   * REJECTED wins over APPROVED — a driver with anything awaiting review is
+   * "pending" so it shows up in the admin's review queue. Drivers with no
+   * documents are absent from the map (= NOT_SUBMITTED).
+   */
+  private async driverKycStates(): Promise<Map<string, 'PENDING' | 'APPROVED' | 'REJECTED'>> {
+    const rows = await this.prisma.$queryRaw<Array<{ driverId: string; kycStatus: string }>>`
+      WITH latest AS (
+        SELECT DISTINCT ON ("driverId", "type") "driverId", "status"::text AS "status"
+        FROM "kyc_documents"
+        ORDER BY "driverId", "type", "createdAt" DESC
+      )
+      SELECT "driverId",
+        CASE
+          WHEN bool_or("status" = 'PENDING') THEN 'PENDING'
+          WHEN bool_or("status" = 'REJECTED') THEN 'REJECTED'
+          ELSE 'APPROVED'
+        END AS "kycStatus"
+      FROM latest
+      GROUP BY "driverId"`;
+    return new Map(
+      rows.map((r) => [r.driverId, r.kycStatus as 'PENDING' | 'APPROVED' | 'REJECTED']),
+    );
+  }
+
+  private async riderRows(where: Prisma.UserWhereInput, take: number, skip: number) {
     const riders = await this.prisma.user.findMany({
-      where: this.userListWhere(UserRole.RIDER, query),
+      where,
       select: USER_SUMMARY_SELECT,
       orderBy: { createdAt: 'desc' },
-      take: query.take ?? 50,
-      skip: query.skip ?? 0,
+      take,
+      skip,
     });
 
     const ids = riders.map((r) => r.id);
@@ -535,19 +691,16 @@ export class AdminOpsService {
     }));
   }
 
-  async listDrivers(query: ListDriversQueryDto) {
+  private async driverRows(where: Prisma.UserWhereInput, take: number, skip: number) {
     const drivers = await this.prisma.user.findMany({
-      where: {
-        ...this.userListWhere(UserRole.DRIVER, query),
-        ...(query.availability ? { driverStatus: { availability: query.availability } } : {}),
-      },
+      where,
       select: {
         ...USER_SUMMARY_SELECT,
         driverStatus: { select: { availability: true, serviceMode: true, vehicleType: true } },
       },
       orderBy: { createdAt: 'desc' },
-      take: query.take ?? 50,
-      skip: query.skip ?? 0,
+      take,
+      skip,
     });
 
     const ids = drivers.map((d) => d.id);
@@ -555,7 +708,7 @@ export class AdminOpsService {
       return [];
     }
 
-    const [rideStats, deliveryStats] = await Promise.all([
+    const [rideStats, deliveryStats, kycStates] = await Promise.all([
       this.prisma.ride.groupBy({
         by: ['driverId'],
         where: { driverId: { in: ids }, status: SETTLED_RIDE_STATUS },
@@ -568,6 +721,7 @@ export class AdminOpsService {
         _count: true,
         _sum: { finalFare: true, commissionAmount: true },
       }),
+      this.driverKycStates(),
     ]);
 
     const rideById = new Map(rideStats.map((r) => [r.driverId, r]));
@@ -589,6 +743,8 @@ export class AdminOpsService {
         // admin table, which reads these off the top level.
         availability: driver.driverStatus?.availability ?? DriverAvailability.OFFLINE,
         vehicleType: driver.driverStatus?.vehicleType ?? null,
+        serviceMode: driver.driverStatus?.serviceMode ?? null,
+        kycStatus: kycStates.get(driver.id) ?? 'NOT_SUBMITTED',
         totalTrips: (rides?._count ?? 0) + (deliveries?._count ?? 0),
         totalEarnings: decimalToFixed(grossFare.minus(commission)),
         totalCommission: decimalToFixed(commission),
@@ -597,9 +753,11 @@ export class AdminOpsService {
   }
 
   private userListWhere(role: UserRole, query: ListUsersQueryDto): Prisma.UserWhereInput {
+    const createdAt = dateFilter(query.from, query.to);
     return {
       role,
       ...(query.status ? { status: query.status } : {}),
+      ...(createdAt ? { createdAt } : {}),
       ...(query.search
         ? {
             OR: [
@@ -610,6 +768,251 @@ export class AdminOpsService {
             ],
           }
         : {}),
+    };
+  }
+
+  private async driverListWhere(
+    query: Pick<
+      ListDriversQueryDto,
+      'search' | 'status' | 'from' | 'to' | 'availability' | 'kycStatus'
+    >,
+  ): Promise<Prisma.UserWhereInput> {
+    const and: Prisma.UserWhereInput[] = [this.userListWhere(UserRole.DRIVER, query)];
+
+    if (query.availability) {
+      // No driver_statuses row means the driver has never gone online, i.e. OFFLINE.
+      and.push(
+        query.availability === DriverAvailability.OFFLINE
+          ? {
+              OR: [
+                { driverStatus: { is: null } },
+                { driverStatus: { availability: DriverAvailability.OFFLINE } },
+              ],
+            }
+          : { driverStatus: { availability: query.availability } },
+      );
+    }
+
+    if (query.kycStatus === 'NOT_SUBMITTED') {
+      and.push({ kycDocuments: { none: {} } });
+    } else if (query.kycStatus) {
+      const states = await this.driverKycStates();
+      const ids = [...states].filter(([, s]) => s === query.kycStatus).map(([id]) => id);
+      and.push({ id: { in: ids } });
+    }
+
+    return { AND: and };
+  }
+
+  // ── Exports ───────────────────────────────────────────────────────────
+
+  async exportRiders(query: ExportUsersQueryDto, actorId: string): Promise<ExportDocument> {
+    const where = this.userListWhere(UserRole.RIDER, query);
+    const [rows, total, summary, generatedBy] = await Promise.all([
+      this.riderRows(where, EXPORT_MAX_ROWS, 0),
+      this.prisma.user.count({ where }),
+      this.riderSummary(),
+      resolveActorName(this.prisma, actorId),
+    ]);
+
+    return {
+      title: 'Riders Report',
+      subtitle: 'Registered riders with wallet balance and trip activity',
+      generatedBy,
+      period: periodOf(query),
+      filters: describeFilters({ Search: query.search, 'Account status': query.status }),
+      summary: [
+        {
+          label: 'Total riders',
+          value: summary.total,
+          format: 'integer',
+          note: 'Every user with the rider role.',
+        },
+        {
+          label: 'Active',
+          value: summary.active,
+          format: 'integer',
+          tone: 'good',
+          note: 'Account status ACTIVE.',
+        },
+        {
+          label: 'Pending verification',
+          value: summary.pendingVerification,
+          format: 'integer',
+          tone: 'warn',
+          note: 'Signed up but have not completed verification.',
+        },
+        {
+          label: 'Suspended',
+          value: summary.suspended,
+          format: 'integer',
+          tone: 'bad',
+          note: 'Account status SUSPENDED.',
+        },
+        {
+          label: 'New in last 7 days',
+          value: summary.newLast7Days,
+          format: 'integer',
+          note: 'Riders registered in the trailing 7 days.',
+        },
+        {
+          label: 'New in last 30 days',
+          value: summary.newLast30Days,
+          format: 'integer',
+          note: 'Riders registered in the trailing 30 days.',
+        },
+        {
+          label: 'Total wallet balance',
+          value: summary.totalWalletBalance,
+          format: 'currency',
+          tone: 'info',
+          note: 'Sum of every rider wallet balance.',
+        },
+        {
+          label: 'Records in this export',
+          value: total,
+          format: 'integer',
+          note: 'Riders matching the filters above (the cards above are platform-wide).',
+        },
+      ],
+      sections: [
+        {
+          name: 'Riders',
+          title: 'Riders',
+          description: 'One row per rider, newest registrations first.',
+          truncatedFrom: total > rows.length ? total : undefined,
+          columns: [
+            { key: 'name', header: 'Name', width: 26 },
+            { key: 'email', header: 'Email', width: 30 },
+            { key: 'phone', header: 'Phone', width: 16 },
+            { key: 'status', header: 'Account status', format: 'status' },
+            { key: 'totalTrips', header: 'Completed rides', format: 'integer', total: true },
+            {
+              key: 'totalDeliveries',
+              header: 'Completed deliveries',
+              format: 'integer',
+              total: true,
+            },
+            { key: 'walletBalance', header: 'Wallet balance', format: 'currency', total: true },
+            { key: 'createdAt', header: 'Registered', format: 'date' },
+          ],
+          rows: rows.map((r) => ({ ...r, name: fullName(r) })),
+        },
+      ],
+    };
+  }
+
+  async exportDrivers(query: ExportDriversQueryDto, actorId: string): Promise<ExportDocument> {
+    const where = await this.driverListWhere(query);
+    const [rows, total, summary, generatedBy] = await Promise.all([
+      this.driverRows(where, EXPORT_MAX_ROWS, 0),
+      this.prisma.user.count({ where }),
+      this.driverSummary(),
+      resolveActorName(this.prisma, actorId),
+    ]);
+
+    return {
+      title: 'Drivers Report',
+      subtitle: 'Registered drivers with KYC status, availability and lifetime earnings',
+      generatedBy,
+      period: periodOf(query),
+      filters: describeFilters({
+        Search: query.search,
+        'Account status': query.status,
+        Availability: query.availability,
+        'KYC status': query.kycStatus,
+      }),
+      summary: [
+        {
+          label: 'Total drivers',
+          value: summary.total,
+          format: 'integer',
+          note: 'Every user with the driver role.',
+        },
+        {
+          label: 'Online now',
+          value: summary.online,
+          format: 'integer',
+          tone: 'good',
+          note: 'Availability is ONLINE (waiting for a job) or ON_TRIP.',
+        },
+        {
+          label: 'Pending KYC',
+          value: summary.pendingKyc,
+          format: 'integer',
+          tone: 'warn',
+          note: 'Drivers with at least one document awaiting admin review.',
+        },
+        {
+          label: 'KYC approved',
+          value: summary.approvedKyc,
+          format: 'integer',
+          tone: 'good',
+          note: 'Latest document of every type approved.',
+        },
+        {
+          label: 'KYC rejected',
+          value: summary.rejectedKyc,
+          format: 'integer',
+          tone: 'bad',
+          note: 'Nothing pending, at least one document rejected.',
+        },
+        {
+          label: 'KYC not submitted',
+          value: summary.kycNotSubmitted,
+          format: 'integer',
+          note: 'No documents uploaded yet.',
+        },
+        {
+          label: 'On a trip',
+          value: summary.onTrip,
+          format: 'integer',
+          tone: 'info',
+          note: 'Currently on a ride or delivery.',
+        },
+        {
+          label: 'Suspended',
+          value: summary.suspended,
+          format: 'integer',
+          tone: 'bad',
+          note: 'Account status SUSPENDED.',
+        },
+        {
+          label: 'New in last 30 days',
+          value: summary.newLast30Days,
+          format: 'integer',
+          note: 'Drivers registered in the trailing 30 days.',
+        },
+        {
+          label: 'Records in this export',
+          value: total,
+          format: 'integer',
+          note: 'Drivers matching the filters above (the cards above are platform-wide).',
+        },
+      ],
+      sections: [
+        {
+          name: 'Drivers',
+          title: 'Drivers',
+          description:
+            'One row per driver, newest registrations first. Earnings are net of commission, over completed rides and deliveries.',
+          truncatedFrom: total > rows.length ? total : undefined,
+          columns: [
+            { key: 'name', header: 'Name', width: 26 },
+            { key: 'phone', header: 'Phone', width: 16 },
+            { key: 'email', header: 'Email', width: 30 },
+            { key: 'status', header: 'Account status', format: 'status' },
+            { key: 'kycStatus', header: 'KYC', format: 'status' },
+            { key: 'availability', header: 'Availability', format: 'status' },
+            { key: 'vehicleType', header: 'Vehicle', width: 14 },
+            { key: 'totalTrips', header: 'Completed trips', format: 'integer', total: true },
+            { key: 'totalEarnings', header: 'Net earnings', format: 'currency', total: true },
+            { key: 'totalCommission', header: 'Commission', format: 'currency', total: true },
+            { key: 'createdAt', header: 'Registered', format: 'date' },
+          ],
+          rows: rows.map((r) => ({ ...r, name: fullName(r) })),
+        },
+      ],
     };
   }
 
@@ -799,58 +1202,70 @@ export class AdminOpsService {
 
   // ── Per-user history (paginated sub-resources) ───────────────────────
 
+  // Every history route returns the standard { data, total, page, ... }
+  // envelope plus a `summary` over the user's WHOLE history (not just the
+  // page), so the detail drawer can show totals next to a paginated table.
+
   async getRiderRides(id: string, take: number, skip: number) {
     await this.assertRole(id, UserRole.RIDER);
-    return this.prisma.ride.findMany({
-      where: { riderId: id },
-      select: RIDE_LIST_SELECT,
-      orderBy: { requestedAt: 'desc' },
-      take,
-      skip,
-    });
+    return this.rideHistory({ riderId: id }, 'rider', take, skip);
   }
 
   async getRiderDeliveries(id: string, take: number, skip: number) {
     await this.assertRole(id, UserRole.RIDER);
-    return this.prisma.delivery.findMany({
-      where: { senderId: id },
-      select: DELIVERY_LIST_SELECT,
-      orderBy: { requestedAt: 'desc' },
-      take,
-      skip,
-    });
+    return this.deliveryHistory({ senderId: id }, 'rider', take, skip);
   }
 
   async getDriverRides(id: string, take: number, skip: number) {
     await this.assertRole(id, UserRole.DRIVER);
-    return this.prisma.ride.findMany({
-      where: { driverId: id },
-      select: RIDE_LIST_SELECT,
-      orderBy: { requestedAt: 'desc' },
-      take,
-      skip,
-    });
+    return this.rideHistory({ driverId: id }, 'driver', take, skip);
   }
 
   async getDriverDeliveries(id: string, take: number, skip: number) {
     await this.assertRole(id, UserRole.DRIVER);
-    return this.prisma.delivery.findMany({
-      where: { driverId: id },
-      select: DELIVERY_LIST_SELECT,
-      orderBy: { requestedAt: 'desc' },
-      take,
-      skip,
-    });
+    return this.deliveryHistory({ driverId: id }, 'driver', take, skip);
   }
 
   async getDriverWithdrawals(id: string, take: number, skip: number) {
     await this.assertRole(id, UserRole.DRIVER);
-    return this.prisma.withdrawalRequest.findMany({
-      where: { driverId: id },
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-    });
+    const where: Prisma.WithdrawalRequestWhereInput = { driverId: id };
+    const [data, total, byStatus] = await Promise.all([
+      this.prisma.withdrawalRequest.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.withdrawalRequest.count({ where }),
+      this.prisma.withdrawalRequest.groupBy({
+        by: ['status'],
+        where,
+        _count: true,
+        _sum: { amount: true, settledCommission: true },
+      }),
+    ]);
+
+    const amountOf = (status: TransactionStatus) =>
+      byStatus.find((r) => r.status === status)?._sum.amount;
+    const countOf = (status: TransactionStatus) =>
+      byStatus.find((r) => r.status === status)?._count ?? 0;
+
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      {
+        total,
+        pending: countOf(TransactionStatus.PENDING),
+        completed: countOf(TransactionStatus.COMPLETED),
+        failed: countOf(TransactionStatus.FAILED),
+        totalWithdrawn: decimalToFixed(amountOf(TransactionStatus.COMPLETED)),
+        pendingAmount: decimalToFixed(amountOf(TransactionStatus.PENDING)),
+        commissionSettled: decimalToFixed(
+          byStatus.find((r) => r.status === TransactionStatus.COMPLETED)?._sum.settledCommission,
+        ),
+      },
+    );
   }
 
   // Every wallet Transaction that touched any account this user owns
@@ -860,17 +1275,95 @@ export class AdminOpsService {
       where: { ownerId: id },
       select: { id: true },
     });
-    if (accounts.length === 0) {
-      return [];
-    }
     const accountIds = accounts.map((a) => a.id);
-    return this.prisma.transaction.findMany({
-      where: { entries: { some: { accountId: { in: accountIds } } } },
-      include: { entries: { where: { accountId: { in: accountIds } } } },
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-    });
+    const where: Prisma.TransactionWhereInput = {
+      entries: { some: { accountId: { in: accountIds } } },
+    };
+    if (accountIds.length === 0) {
+      return toPaginated([], 0, { take, skip }, { total: 0, completed: 0, pending: 0, failed: 0 });
+    }
+
+    const [data, total, byStatus] = await Promise.all([
+      this.prisma.transaction.findMany({
+        where,
+        include: { entries: { where: { accountId: { in: accountIds } } } },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.transaction.count({ where }),
+      this.prisma.transaction.groupBy({ by: ['status'], where, _count: true }),
+    ]);
+    const counts = tallyByStatus(byStatus);
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      {
+        total,
+        completed: counts[TransactionStatus.COMPLETED] ?? 0,
+        pending: counts[TransactionStatus.PENDING] ?? 0,
+        failed: counts[TransactionStatus.FAILED] ?? 0,
+      },
+    );
+  }
+
+  private async rideHistory(
+    where: Prisma.RideWhereInput,
+    party: 'rider' | 'driver',
+    take: number,
+    skip: number,
+  ) {
+    const [data, total, byStatus, settled] = await Promise.all([
+      this.prisma.ride.findMany({
+        where,
+        select: RIDE_LIST_SELECT,
+        orderBy: { requestedAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.ride.count({ where }),
+      this.prisma.ride.groupBy({ by: ['status'], where, _count: true }),
+      this.prisma.ride.aggregate({
+        where: { ...where, status: SETTLED_RIDE_STATUS },
+        _sum: { finalFare: true, commissionAmount: true },
+      }),
+    ]);
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      historySummary(party, total, byStatus, settled._sum),
+    );
+  }
+
+  private async deliveryHistory(
+    where: Prisma.DeliveryWhereInput,
+    party: 'rider' | 'driver',
+    take: number,
+    skip: number,
+  ) {
+    const [data, total, byStatus, settled] = await Promise.all([
+      this.prisma.delivery.findMany({
+        where,
+        select: DELIVERY_LIST_SELECT,
+        orderBy: { requestedAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.delivery.count({ where }),
+      this.prisma.delivery.groupBy({ by: ['status'], where, _count: true }),
+      this.prisma.delivery.aggregate({
+        where: { ...where, status: SETTLED_DELIVERY_STATUS },
+        _sum: { finalFare: true, commissionAmount: true },
+      }),
+    ]);
+    return toPaginated(
+      data,
+      total,
+      { take, skip },
+      historySummary(party, total, byStatus, settled._sum),
+    );
   }
 
   // ── Suspend / activate ──────────────────────────────────────────────
@@ -918,6 +1411,84 @@ export class AdminOpsService {
       query.skip ?? 0,
     );
     return toPaginated(data, total, query);
+  }
+
+  async exportAuditLogs(query: ExportAuditQueryDto, exportedById: string): Promise<ExportDocument> {
+    const [{ data, total }, generatedBy] = await Promise.all([
+      this.audit.list(
+        {
+          action: query.action,
+          targetType: query.targetType,
+          actorId: query.actorId,
+          from: query.from,
+          to: query.to,
+        },
+        EXPORT_MAX_ROWS,
+        0,
+      ),
+      resolveActorName(this.prisma, exportedById),
+    ]);
+
+    const actorIds = [...new Set(data.map((d) => d.actorId).filter((id): id is string => !!id))];
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, firstName: true, lastName: true, email: true },
+        })
+      : [];
+    const actorName = new Map(actors.map((a) => [a.id, fullName(a) || a.email || a.id]));
+
+    return {
+      title: 'Audit Log',
+      subtitle: 'Administrative actions recorded on the platform',
+      generatedBy,
+      period: periodOf(query),
+      filters: describeFilters({
+        Action: query.action,
+        'Target type': query.targetType,
+        Actor: query.actorId ? (actorName.get(query.actorId) ?? query.actorId) : undefined,
+      }),
+      summary: [
+        {
+          label: 'Events',
+          value: total,
+          format: 'integer',
+          note: 'Audit events matching the filters.',
+        },
+        {
+          label: 'Distinct actors',
+          value: actorIds.length,
+          format: 'integer',
+          note: 'Different people who performed those actions.',
+        },
+        {
+          label: 'Distinct actions',
+          value: new Set(data.map((d) => d.action)).size,
+          format: 'integer',
+          note: 'Different action types in the result.',
+        },
+      ],
+      sections: [
+        {
+          name: 'Audit log',
+          description: 'One row per recorded action, newest first.',
+          truncatedFrom: total > data.length ? total : undefined,
+          columns: [
+            { key: 'createdAt', header: 'When', format: 'datetime' },
+            { key: 'actor', header: 'Actor', width: 26 },
+            { key: 'action', header: 'Action', width: 28 },
+            { key: 'targetType', header: 'Target type', width: 16 },
+            { key: 'targetId', header: 'Target ID', width: 38 },
+            { key: 'details', header: 'Details', width: 40 },
+          ],
+          rows: data.map((d) => ({
+            ...d,
+            actor: d.actorId ? (actorName.get(d.actorId) ?? d.actorId) : 'System',
+            details: d.metadata ? JSON.stringify(d.metadata).slice(0, 300) : '',
+          })),
+        },
+      ],
+    };
   }
 
   // ── internals ───────────────────────────────────────────────────────

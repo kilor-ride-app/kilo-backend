@@ -1,9 +1,11 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType, OmitType } from '@nestjs/swagger';
 import { TicketPriority, TicketStatus } from '@prisma/client';
 import { IsEnum, IsOptional, IsString } from 'class-validator';
-import { PaginationDto } from '../../wallet/dto/pagination.dto';
+import { DateRangeQueryDto } from '../../common/dto/date-range-query.dto';
+import { ExportFormatDto } from '../../common/export/export-format.dto';
 
-export class ListTicketsQueryDto extends PaginationDto {
+// `from`/`to` (inherited) filter on the date the ticket was opened.
+export class ListTicketsQueryDto extends DateRangeQueryDto {
   @ApiProperty({ enum: TicketStatus, required: false })
   @IsOptional()
   @IsEnum(TicketStatus)
@@ -19,3 +21,8 @@ export class ListTicketsQueryDto extends PaginationDto {
   @IsString()
   assignedToId?: string;
 }
+
+export class ExportTicketsQueryDto extends IntersectionType(
+  OmitType(ListTicketsQueryDto, ['take', 'skip'] as const),
+  ExportFormatDto,
+) {}

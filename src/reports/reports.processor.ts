@@ -1,10 +1,10 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { ReportFormat } from '@prisma/client';
 import { Job } from 'bullmq';
+import { exportFilename, renderExport } from '../common/export/export.util';
 import { EmailService } from '../integrations/email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { REPORTS_QUEUE, ReportsService } from './reports.service';
+import { REPORTS_QUEUE, ReportsService, toExportFormat } from './reports.service';
 
 const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000; // each tick covers the trailing 30 days, regardless of frequency
 
@@ -30,16 +30,20 @@ export class ReportsProcessor extends WorkerHost {
 
     const to = new Date();
     const from = new Date(to.getTime() - LOOKBACK_MS);
-    const rows = await this.reports.generate(schedule.type, { from, to });
-    const csv = this.reports.exportCsv(rows, schedule.format ?? ReportFormat.CSV);
+    const doc = await this.reports.buildExportDocument(
+      schedule.type,
+      { from, to },
+      'Scheduled report',
+    );
+    const rendered = await renderExport(doc, toExportFormat(schedule.format));
 
     await this.email.sendWithAttachment(
       schedule.recipientEmail,
       `Kilo ${schedule.type.toLowerCase()} report — ${to.toISOString().slice(0, 10)}`,
       `<p>Attached: the ${schedule.type.toLowerCase()} report for ${from.toISOString().slice(0, 10)} to ${to.toISOString().slice(0, 10)}.</p>`,
       {
-        filename: `${schedule.type.toLowerCase()}-report-${to.toISOString().slice(0, 10)}.csv`,
-        content: Buffer.from(csv, 'utf-8'),
+        filename: exportFilename(`${schedule.type}-report`, rendered.extension, to),
+        content: rendered.buffer,
       },
     );
 

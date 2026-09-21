@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { BatterySwapStation, BatterySwapStationStatus } from '@prisma/client';
 import { haversineDistanceKm } from '../common/utils/haversine.util';
+import { toPaginated } from '../common/utils/paginate.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 
@@ -111,11 +112,15 @@ export class BatterySwapService {
   }
 
   async listAllReservations(take = 50, skip = 0) {
-    return this.prisma.batterySwapReservation.findMany({
-      orderBy: { createdAt: 'desc' },
-      take,
-      skip,
-    });
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.batterySwapReservation.findMany({
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.batterySwapReservation.count(),
+    ]);
+    return toPaginated(data, total, { take, skip });
   }
 
   // Not in the plan's endpoint table — but swap stations have to be

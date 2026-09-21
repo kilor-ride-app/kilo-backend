@@ -17,7 +17,13 @@ function escapeCsvCell(value: unknown): string {
   if (value === null || value === undefined) {
     return '';
   }
-  const str = value instanceof Date ? value.toISOString() : String(value);
+  let str = value instanceof Date ? value.toISOString() : String(value);
+  // CSV injection: Excel runs a text cell starting with = + - @ as a formula.
+  // Free-text fields (names, addresses, ticket subjects) reach exports, so
+  // neutralise them; real numbers are typed `number`, not strings, and pass through.
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(str) && Number.isNaN(Number(str))) {
+    str = `'${str}`;
+  }
   if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
