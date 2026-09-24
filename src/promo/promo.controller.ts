@@ -39,6 +39,11 @@ export class PromoController {
     };
   }
 
+  @Get('promos/featured')
+  featured() {
+    return this.promo.listFeatured();
+  }
+
   @Get('users/me/promos/redemptions')
   myRedemptions(@CurrentUser() user: AuthenticatedUser, @Query() query: PaginationDto) {
     return this.promo.myRedemptions(user.userId, query.take, query.skip);

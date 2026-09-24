@@ -17,6 +17,7 @@ import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../common/guards/optional-jwt-auth.guard';
 import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
 import { PaginationDto } from '../wallet/dto/pagination.dto';
 import { CancelDeliveryDto } from './dto/cancel-delivery.dto';
@@ -37,11 +38,13 @@ export class LogisticsController {
     private readonly trip: LogisticsTripService,
   ) {}
 
-  // Public — same rationale as rides/fare-estimate: pricing a job shouldn't require login.
+  // Public — same rationale as rides/fare-estimate: pricing a job shouldn't
+  // require login. A token, when sent, lets a promo code be priced in.
+  @UseGuards(OptionalJwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('deliveries/quote')
-  quote(@Body() dto: QuoteDeliveryDto) {
-    return this.logistics.quote(dto);
+  quote(@CurrentUser() user: AuthenticatedUser | null, @Body() dto: QuoteDeliveryDto) {
+    return this.logistics.quote(dto, user?.userId);
   }
 
   @ApiBearerAuth('access-token')
@@ -94,6 +97,31 @@ export class LogisticsController {
   declineDelivery(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     this.assertDriver(user);
     return this.dispatch.declineOffer(user.userId, id);
+  }
+
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @Get('deliveries/:id/proof-of-delivery')
+  getProofOfDelivery(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.logistics.getProofOfDelivery(user.userId, id);
+  }
+
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('deliveries/:id/arrived-pickup')
+  arrivedAtPickup(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    this.assertDriver(user);
+    return this.trip.markArrivedAtPickup(user.userId, id);
+  }
+
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('deliveries/:id/arrived-dropoff')
+  arrivedAtDropoff(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    this.assertDriver(user);
+    return this.trip.markArrivedAtDropoff(user.userId, id);
   }
 
   @ApiBearerAuth('access-token')

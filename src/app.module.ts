@@ -26,6 +26,9 @@ import { SupportModule } from './support/support.module';
 import { AdminOpsModule } from './admin-ops/admin-ops.module';
 import { ReportsModule } from './reports/reports.module';
 import { AuditModule } from './audit/audit.module';
+import { SavedPlacesModule } from './saved-places/saved-places.module';
+import { DriversModule } from './drivers/drivers.module';
+import { ActivityModule } from './activity/activity.module';
 
 @Module({
   imports: [
@@ -77,6 +80,9 @@ import { AuditModule } from './audit/audit.module';
     AdminOpsModule,
     ReportsModule,
     AuditModule,
+    SavedPlacesModule,
+    DriversModule,
+    ActivityModule,
   ],
   providers: [
     // Applies the ThrottlerModule config above to every route by default

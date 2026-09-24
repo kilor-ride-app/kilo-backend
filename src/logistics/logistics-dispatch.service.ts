@@ -14,6 +14,9 @@ import {
 } from '@prisma/client';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { DriverOffersGateway } from '../rides/gateways/driver-offers.gateway';
+import { RideTrackingGateway } from '../rides/gateways/ride-tracking.gateway';
+import { NotificationCategory } from '../notifications/notification-categories';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 
@@ -36,6 +39,8 @@ export class LogisticsDispatchService {
     private readonly redis: RedisService,
     private readonly driverOffers: DriverOffersGateway,
     private readonly platformConfig: PlatformConfigService,
+    private readonly tracking: RideTrackingGateway,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // Same config key + default DispatchService (rides) reads — the cap is
@@ -80,8 +85,13 @@ export class LogisticsDispatchService {
     for (const driverId of candidates) {
       this.driverOffers.emitDeliveryOffer(driverId, {
         deliveryId,
+        serviceType: delivery.serviceType,
         pickupAddress: delivery.pickupAddress,
         packageDescription: delivery.packageDescription,
+        weightKg: delivery.weightKg,
+        packageSize: delivery.packageSize,
+        isFragile: delivery.isFragile,
+        deliveryNotes: delivery.deliveryNotes,
         estimatedFare: delivery.estimatedFare,
         expiresAt,
       });
@@ -131,6 +141,15 @@ export class LogisticsDispatchService {
       });
       throw new ConflictException('Another driver already accepted this delivery');
     }
+
+    this.tracking.emitDeliveryStatus(deliveryId, { status: DeliveryStatus.ACCEPTED, driverId });
+    this.notifications.notify(
+      deliveryPreview.senderId,
+      NotificationCategory.TRIPS,
+      'Driver assigned',
+      `A driver has accepted your delivery to ${deliveryPreview.receiverName} and is heading to pickup.`,
+      { deliveryId },
+    );
 
     await this.prisma.deliveryOffer.update({
       where: { id: offer.id },
@@ -258,12 +277,15 @@ export class LogisticsDispatchService {
   }
 
   private async resolveNoDrivers(deliveryId: string) {
-    await this.prisma.delivery.updateMany({
+    const resolved = await this.prisma.delivery.updateMany({
       where: {
         id: deliveryId,
         status: { in: [DeliveryStatus.REQUESTED, DeliveryStatus.DISPATCHING] },
       },
       data: { status: DeliveryStatus.NO_DRIVERS_FOUND },
     });
+    if (resolved.count > 0) {
+      this.tracking.emitDeliveryStatus(deliveryId, { status: DeliveryStatus.NO_DRIVERS_FOUND });
+    }
   }
 }

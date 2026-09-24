@@ -24,8 +24,10 @@ const UNRESOLVED: TicketStatus[] = [
 ];
 
 const TICKET_PARTIES = {
-  user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-  assignedTo: { select: { id: true, firstName: true, lastName: true } },
+  user: {
+    select: { id: true, publicId: true, firstName: true, lastName: true, phone: true, email: true },
+  },
+  assignedTo: { select: { id: true, publicId: true, firstName: true, lastName: true } },
 } as const;
 
 interface TicketFilters {

@@ -158,7 +158,14 @@ export class KycService {
     const users = groups.length
       ? await this.prisma.user.findMany({
           where: { id: { in: groups.map((g) => g.driverId) } },
-          select: { id: true, firstName: true, lastName: true, phone: true, email: true },
+          select: {
+            id: true,
+            publicId: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+          },
         })
       : [];
     const byId = new Map(users.map((u) => [u.id, u]));

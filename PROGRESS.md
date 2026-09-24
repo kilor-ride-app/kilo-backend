@@ -413,6 +413,59 @@ but **not applied to the real kilo database** — the local Docker stack couldn'
 `npm run seed:permissions` is a no-op (no new keys) and `npm run seed:mock:reset` re-seeds with
 the new columns. No automated tests added — the repo has none.
 
+### Mobile rider app alignment (not in the original plan — built on direct request)
+
+Built against the in-progress rider-app design (`KILO APP/`, 144 screens; the Kilowatt tab has no
+screens yet). Migrations: `20260924120000_public_ids` (short `publicId` on 15 models — see the
+`public-ids` note) and `20260924130000_mobile_app_alignment` (additive only). Decisions taken
+with the user: **dispatch stays automatic** (the design's "pick a driver" screen is to be
+dropped), **riders are OTP-only** (no password at sign-up).
+
+| Screen(s) | Endpoint(s) |
+|---|---|
+| Create account → verify phone | `POST /auth/riders/register` (no `password`), `POST /auth/otp/verify` |
+| Log in (phone only) | `POST /auth/otp/send` (`LOGIN`) → `POST /auth/otp/verify` |
+| Profile / edit / language | `GET\|PATCH /users/me` (+ `preferredLanguage` EN/HA/YO/IG), `POST /users/me/avatar` |
+| Next of kin | `PUT\|DELETE /users/me/next-of-kin` (shown on `GET /users/me`) |
+| Saved places / recent places | `GET\|POST /users/me/places`, `PATCH\|DELETE /users/me/places/:id`, `GET /users/me/places/recent` |
+| Where-to search, use current location | `GET /places/autocomplete?query&lat&lng`, `GET /places/details?placeId`, `GET /places/reverse-geocode?lat&lng` |
+| Home banner | `GET /promos/featured` |
+| Ride details (Standard/Keke/Comfort) | `POST /rides/fare-estimate` (no `vehicleType` → all options; per option `subtotal/promoDiscount/tax/total/tripMinutes/pickupEtaMinutes`; promo priced in when a token is sent) |
+| Book / driver on the way / arrived / trip in progress | `POST /rides`, `GET /rides/:id` (+ `driver` card: rating, trips, vehicle, phone; `driverPosition`), WS `/rides` `subscribe` |
+| Share ride | `POST /rides/:id/share` → public `GET /track/ride/:shareToken` (unprefixed) |
+| Trip completed / rate / reviews | `GET /rides/:id/receipt`, `POST /rides/:id/rate`, `GET /rides/reviews`; receipt emailed to verified addresses |
+| Package / freight booking + details | `POST /deliveries/quote` (`serviceType` PACKAGE\|FREIGHT, `promoCode`), `POST /deliveries` (`weightKg`, `packageSize`, `isFragile`, `deliveryNotes`, `scheduledFor`, `paymentMethod: BUSINESS_INVOICE`) |
+| Package tracking + progress | `GET /deliveries/:id` (+ `driver`, `driverPosition`, `timeline`), WS `/rides` `subscribe:delivery`; driver milestones `POST /deliveries/:id/arrived-pickup\|arrived-dropoff` |
+| Delivery completed → proof | `GET /deliveries/:id/proof-of-delivery` |
+| Activity (All/Rides/Deliveries/Kilowatt) | `GET /activity?type=` → `{ ongoing, items, total }` |
+| Wallet / transaction details | `GET /wallet`, `GET /wallet/transactions` (titles, signed amounts, payment method), `GET /wallet/transactions/:id` |
+| Top up (card / saved card / bank transfer) + processing | `POST /wallet/topup` (`method`, `cardId`, `saveCard`), poll `GET /wallet/topup/:reference` |
+| Add card / payment methods | `POST /wallet/cards` (Paystack checkout → card saved on success), `GET /wallet/cards`, `PATCH /wallet/cards/:id/default`, `DELETE /wallet/cards/:id` |
+| Notifications | `GET /notifications`, `GET /notifications/unread-count`, `DELETE /notifications/:id`, preferences keyed TRIPS/PROMOTIONS/ACCOUNT/TIPS/PRODUCT |
+| Driver app (vehicle shown to riders) | `GET\|PUT /drivers/me/vehicle` |
+
+Also: tariffs gained `serviceType` (null = any service, so existing tariffs keep working),
+`displayName`/`description`/`sortOrder`/`durationMultiplier`; fares carry a
+`subtotalFare/promoDiscount/taxAmount` breakdown with tax from PlatformConfig `fareTaxRate`
+(default 0) posted to the new `PLATFORM_TAX_PAYABLE` account (run `npm run
+seed:platform-accounts`); rides, deliveries and top-ups now create in-app/push notifications.
+Fixed along the way: participant delivery responses leaked `receiverOtpHash` (a hash of a
+6-digit code — brute-forceable, letting a driver fake OTP proof of delivery); a driver top-up
+webhook delivered twice could credit the wallet twice after settling commission.
+
+**Verified live** against throwaway Postgres/Redis (all 18 migrations, zero drift; 5,000-row
+publicId backfill all distinct): 80-check end-to-end script over the endpoints above, including
+ledger splits (tax/commission/driver), scheduled-freight release via the delayed job, business
+credit-limit enforcement, and owner scoping. **Not verified**: anything that needs real Paystack
+(card checkout, saved-card charge, bank transfer, webhook crediting), Google Maps, or real
+SMS/email/push delivery.
+
+**Known gaps / follow-ups**: cash-trip tax is added to the driver's commission debt but
+`settleCommission` books the whole settlement as revenue (not split to tax payable);
+in-app calling needs a voice provider (the "Call driver" phone number works); Kilowatt screens
+not designed yet; the web page behind `TRACKING_BASE_URL/ride/:token` needs building in the
+frontend.
+
 ---
 
 ## 3. Credentials & external setup checklist

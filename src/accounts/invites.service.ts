@@ -146,7 +146,7 @@ export class InvitesService {
         acceptedAt: true,
         createdAt: true,
         roles: { select: { id: true, name: true } },
-        invitedBy: { select: { id: true, firstName: true, lastName: true } },
+        invitedBy: { select: { id: true, publicId: true, firstName: true, lastName: true } },
       },
       orderBy: { createdAt: 'desc' },
     });

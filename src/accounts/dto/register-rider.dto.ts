@@ -1,6 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsOptional, IsPhoneNumber, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsPhoneNumber, IsString } from 'class-validator';
 
+// Riders sign in with phone + OTP only (POST /auth/otp/send with purpose
+// LOGIN, then /auth/otp/verify) — there is no rider password to set.
 export class RegisterRiderDto {
   @ApiProperty({ example: 'Ada' })
   @IsString()
@@ -18,9 +20,4 @@ export class RegisterRiderDto {
   @IsOptional()
   @IsEmail()
   email?: string;
-
-  @ApiProperty({ minLength: 8, example: 'a-strong-password' })
-  @IsString()
-  @MinLength(8)
-  password: string;
 }

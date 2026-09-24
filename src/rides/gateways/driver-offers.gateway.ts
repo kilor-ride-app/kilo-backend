@@ -72,8 +72,13 @@ export class DriverOffersGateway implements OnGatewayConnection, OnGatewayDiscon
     driverId: string,
     offer: {
       deliveryId: string;
+      serviceType: string;
       pickupAddress: string;
       packageDescription: string;
+      weightKg: unknown;
+      packageSize: string | null;
+      isFragile: boolean;
+      deliveryNotes: string | null;
       estimatedFare: unknown;
       expiresAt: Date;
     },

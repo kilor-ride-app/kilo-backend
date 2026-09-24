@@ -69,8 +69,17 @@ export class SolarAssessmentsService {
         take,
         skip,
         include: {
-          assignedRep: { select: { id: true, firstName: true, lastName: true } },
-          user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+          assignedRep: { select: { id: true, publicId: true, firstName: true, lastName: true } },
+          user: {
+            select: {
+              id: true,
+              publicId: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              email: true,
+            },
+          },
         },
       }),
       this.prisma.solarAssessment.count({ where }),

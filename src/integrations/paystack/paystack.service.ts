@@ -16,13 +16,47 @@ export interface InitializeTransactionResult {
   reference: string;
 }
 
+// Present on card payments. `authorization_code` is what lets us charge
+// the card again later without the customer re-entering it.
+export interface PaystackAuthorization {
+  authorization_code: string;
+  last4: string;
+  exp_month: string;
+  exp_year: string;
+  card_type: string; // "visa ", "mastercard", "verve" (Paystack pads some)
+  brand?: string;
+  bank: string | null;
+  channel: string; // "card", "bank_transfer", ...
+  reusable: boolean;
+  signature: string | null; // per-card fingerprint
+}
+
 export interface VerifyTransactionResult {
-  status: string; // 'success' | 'failed' | 'abandoned' | ...
+  status: string; // 'success' | 'failed' | 'abandoned' | 'pending' | 'ongoing' | ...
   reference: string;
   amount: number; // kobo
   currency: string;
+  channel?: string;
+  gateway_response?: string;
   metadata: Record<string, unknown> | null;
   customer: { email: string };
+  authorization?: PaystackAuthorization;
+}
+
+export interface ChargeAuthorizationResult {
+  status: string; // 'success' | 'failed' | 'send_otp' | ...
+  reference: string;
+  gateway_response?: string;
+}
+
+export interface BankTransferChargeResult {
+  status: string; // 'pending_bank_transfer'
+  reference: string;
+  display_text?: string;
+  account_name: string;
+  account_number: string;
+  bank: { name: string; slug?: string };
+  account_expires_at: string;
 }
 
 export interface ResolveAccountResult {
@@ -53,12 +87,50 @@ export class PaystackService {
     amountKobo: number;
     reference: string;
     metadata?: Record<string, unknown>;
+    channels?: string[];
   }): Promise<InitializeTransactionResult> {
     return this.request('POST', '/transaction/initialize', {
       email: params.email,
       amount: params.amountKobo,
       reference: params.reference,
       metadata: params.metadata,
+      ...(params.channels ? { channels: params.channels } : {}),
+    });
+  }
+
+  // Charges a card saved from an earlier payment. Usually resolves
+  // synchronously; charge.success still arrives via webhook either way.
+  async chargeAuthorization(params: {
+    email: string;
+    amountKobo: number;
+    authorizationCode: string;
+    reference: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<ChargeAuthorizationResult> {
+    return this.request('POST', '/transaction/charge_authorization', {
+      email: params.email,
+      amount: params.amountKobo,
+      authorization_code: params.authorizationCode,
+      reference: params.reference,
+      metadata: params.metadata,
+    });
+  }
+
+  // "Pay with Transfer": Paystack issues a temporary account number for
+  // exactly this payment; charge.success fires once the money lands.
+  async chargeBankTransfer(params: {
+    email: string;
+    amountKobo: number;
+    reference: string;
+    expiresAt: Date;
+    metadata?: Record<string, unknown>;
+  }): Promise<BankTransferChargeResult> {
+    return this.request('POST', '/charge', {
+      email: params.email,
+      amount: params.amountKobo,
+      reference: params.reference,
+      metadata: params.metadata,
+      bank_transfer: { account_expires_at: params.expiresAt.toISOString() },
     });
   }
 

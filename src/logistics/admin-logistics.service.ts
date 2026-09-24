@@ -17,7 +17,9 @@ import { WalletService } from '../wallet/wallet.service';
 import { ExportDeliveriesQueryDto, ListDeliveriesQueryDto } from './dto/list-deliveries-query.dto';
 import { LogisticsDispatchService } from './logistics-dispatch.service';
 
-const PARTY = { select: { id: true, firstName: true, lastName: true, phone: true } } as const;
+const PARTY = {
+  select: { id: true, publicId: true, firstName: true, lastName: true, phone: true },
+} as const;
 const ACTIVE_DELIVERY_STATUSES: DeliveryStatus[] = [
   DeliveryStatus.DISPATCHING,
   DeliveryStatus.ACCEPTED,
@@ -47,6 +49,7 @@ export class AdminLogisticsService {
         ? {
             OR: [
               { id: { startsWith: search } },
+              { publicId: contains },
               { packageDescription: contains },
               { receiverName: contains },
               { sender: { firstName: contains } },
@@ -68,7 +71,7 @@ export class AdminLogisticsService {
           stops: { orderBy: { sequence: 'asc' } },
           sender: PARTY,
           driver: PARTY,
-          business: { select: { id: true, name: true } },
+          business: { select: { id: true, publicId: true, name: true } },
         },
         orderBy: { createdAt: 'desc' },
         take,
@@ -107,7 +110,11 @@ export class AdminLogisticsService {
     const [rows, total, byStatus, settled, generatedBy] = await Promise.all([
       this.prisma.delivery.findMany({
         where,
-        include: { sender: PARTY, driver: PARTY, business: { select: { id: true, name: true } } },
+        include: {
+          sender: PARTY,
+          driver: PARTY,
+          business: { select: { id: true, publicId: true, name: true } },
+        },
         orderBy: { requestedAt: 'desc' },
         take: EXPORT_MAX_ROWS,
       }),

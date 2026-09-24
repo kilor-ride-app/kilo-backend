@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
+import { DriversModule } from '../drivers/drivers.module';
+import { EmailModule } from '../integrations/email/email.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { GoogleMapsModule } from '../integrations/google-maps/google-maps.module';
 import { PlatformConfigModule } from '../platform-config/platform-config.module';
 import { PricingModule } from '../pricing/pricing.module';
@@ -15,6 +18,7 @@ import { DispatchService } from './dispatch.service';
 import { DriverOffersGateway } from './gateways/driver-offers.gateway';
 import { RideTrackingGateway } from './gateways/ride-tracking.gateway';
 import { PlacesController } from './places.controller';
+import { PublicRideTrackingController } from './public-ride-tracking.controller';
 import { RidesController } from './rides.controller';
 import { RidesService } from './rides.service';
 import { TripService } from './trip.service';
@@ -27,6 +31,9 @@ import { TripService } from './trip.service';
     PromoModule,
     ServiceAreasModule,
     WalletModule,
+    DriversModule,
+    EmailModule,
+    NotificationsModule,
     // Gateways verify the same access token as every REST endpoint —
     // registered here too since this module's sockets authenticate
     // independently of the HTTP guard chain.
@@ -38,7 +45,13 @@ import { TripService } from './trip.service';
       }),
     }),
   ],
-  controllers: [PlacesController, RidesController, DispatchController, AdminRidesController],
+  controllers: [
+    PlacesController,
+    RidesController,
+    DispatchController,
+    AdminRidesController,
+    PublicRideTrackingController,
+  ],
   providers: [
     RidesService,
     DispatchService,
@@ -52,6 +65,8 @@ import { TripService } from './trip.service';
   // LogisticsModule can reuse the shared driver-status state machine and
   // the single per-driver WS connection for delivery offers — see
   // plan.md Section 6: "Logistics reuses dispatch/trip/wallet infra from rides."
-  exports: [DispatchService, DriverOffersGateway],
+  // RideTrackingGateway too, so delivery status/location reach the sender
+  // over the same /rides socket.
+  exports: [DispatchService, DriverOffersGateway, RideTrackingGateway],
 })
 export class RidesModule {}

@@ -84,6 +84,8 @@ export class WalletService {
     });
   }
 
+  // `taxAmount` is part of fareAmount but belongs to neither the driver
+  // nor the platform — it's routed to PLATFORM_TAX_PAYABLE.
   async payForRide(
     riderId: string,
     driverId: string,
@@ -91,8 +93,9 @@ export class WalletService {
     commissionAmount: Decimal,
     reference: string,
     metadata?: Prisma.InputJsonValue,
+    taxAmount: Decimal = new Prisma.Decimal(0),
   ) {
-    const driverAmount = fareAmount.minus(commissionAmount);
+    const driverAmount = fareAmount.minus(commissionAmount).minus(taxAmount);
     const [riderAccount, driverAccount, platformRevenue] = await Promise.all([
       this.getOrCreateUserAccount(riderId, AccountType.RIDER_WALLET),
       this.getOrCreateUserAccount(driverId, AccountType.DRIVER_WALLET),
@@ -112,6 +115,7 @@ export class WalletService {
           direction: LedgerDirection.CREDIT,
           amount: commissionAmount,
         },
+        ...(await this.taxEntries(taxAmount)),
       ],
     });
   }
@@ -127,8 +131,9 @@ export class WalletService {
     commissionAmount: Decimal,
     reference: string,
     metadata?: Prisma.InputJsonValue,
+    taxAmount: Decimal = new Prisma.Decimal(0),
   ) {
-    const driverAmount = fareAmount.minus(commissionAmount);
+    const driverAmount = fareAmount.minus(commissionAmount).minus(taxAmount);
     const [senderAccount, driverAccount, platformRevenue] = await Promise.all([
       this.getOrCreateUserAccount(senderId, AccountType.RIDER_WALLET),
       this.getOrCreateUserAccount(driverId, AccountType.DRIVER_WALLET),
@@ -148,6 +153,7 @@ export class WalletService {
           direction: LedgerDirection.CREDIT,
           amount: commissionAmount,
         },
+        ...(await this.taxEntries(taxAmount)),
       ],
     });
   }
@@ -321,8 +327,10 @@ export class WalletService {
     commissionAmount: Decimal,
     reference: string,
     metadata?: Prisma.InputJsonValue,
+    taxAmount: Decimal = new Prisma.Decimal(0),
   ): Promise<Transaction> {
-    const driverAmount = fareAmount.minus(commissionAmount);
+    const driverAmount = fareAmount.minus(commissionAmount).minus(taxAmount);
+    const taxLines = await this.taxEntries(taxAmount);
     const [wallet, driverAccount, platformRevenue, payable, clearing] = await Promise.all([
       this.getOrCreateUserAccount(businessId, AccountType.BUSINESS_WALLET),
       this.getOrCreateUserAccount(driverId, AccountType.DRIVER_WALLET),
@@ -345,6 +353,7 @@ export class WalletService {
             direction: LedgerDirection.CREDIT,
             amount: commissionAmount,
           },
+          ...taxLines,
         ],
       });
       await this.postTransactionEntries(tx, {
@@ -510,6 +519,16 @@ export class WalletService {
       });
       return refundTx;
     });
+  }
+
+  // Only touches PLATFORM_TAX_PAYABLE when there is tax to post, so a zero
+  // tax rate never depends on that account having been seeded.
+  private async taxEntries(taxAmount: Decimal) {
+    if (taxAmount.lessThanOrEqualTo(0)) {
+      return [];
+    }
+    const taxPayable = await this.getPlatformAccount(AccountType.PLATFORM_TAX_PAYABLE);
+    return [{ accountId: taxPayable.id, direction: LedgerDirection.CREDIT, amount: taxAmount }];
   }
 
   async getTransactionsForAccount(accountId: string, take = 50, skip = 0) {

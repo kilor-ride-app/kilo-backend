@@ -1,8 +1,10 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { DeliveryServiceType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
+  IsEnum,
   IsLatitude,
   IsLongitude,
   IsOptional,
@@ -32,4 +34,18 @@ export class QuoteDeliveryDto {
   @IsOptional()
   @IsString()
   vehicleType?: string;
+
+  @ApiProperty({ enum: DeliveryServiceType, required: false, default: DeliveryServiceType.PACKAGE })
+  @IsOptional()
+  @IsEnum(DeliveryServiceType)
+  serviceType?: DeliveryServiceType;
+
+  @ApiProperty({
+    required: false,
+    example: 'KILO55',
+    description: 'Applied only when the request carries a valid access token',
+  })
+  @IsOptional()
+  @IsString()
+  promoCode?: string;
 }

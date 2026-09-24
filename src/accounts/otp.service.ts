@@ -10,7 +10,7 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 // Longer than the numeric-code TTL — a link sits in an inbox and gets
 // clicked later, where a code is read off the same screen it's typed into.
-const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
+export const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
 
 // Generic "generate a code tied to a user+purpose, verify it later" core,
 // shared by phone OTP (AuthService) and email verification
@@ -65,8 +65,8 @@ export class OtpService {
 
   // Link-based counterpart to generateAndStore/verify above — a
   // high-entropy token instead of a guessable 6-digit code, so it's looked
-  // up by its own hash rather than by userId+purpose (the caller doesn't
-  // know the userId until the token resolves it).
+  // up by its own hash rather than by userId+purpose (the caller presents
+  // only the token, which resolves the user).
   async generateAndStoreToken(userId: string, purpose: OtpPurpose): Promise<string> {
     const token = generateSecureToken();
     await this.prisma.otpCode.create({
@@ -82,16 +82,16 @@ export class OtpService {
 
   // ── Two-step consumption, for flows that must act before burning ────
   //
-  // The password-reset flow can't use verify()/consume-on-read: it has to
-  // (1) check the credential, (2) save the new password, and only then burn
-  // the credential — all-or-nothing, and safe when the same link arrives
-  // twice at once. So it's split: find* checks without consuming (a wrong
-  // code still counts an attempt), claim() burns it atomically inside the
-  // caller's transaction, consumeAll() kills whatever else is outstanding.
-  // Every failure is a plain null — the caller decides how (uniformly) to
-  // report it, so nothing here leaks *why* a credential was rejected.
+  // The password-reset flow can't consume on read: it has to (1) check the
+  // token, (2) save the new password, and only then burn the token — all or
+  // nothing, and safe when the same link arrives twice at once. So it's
+  // split: findLiveToken checks without consuming, claim() burns it
+  // atomically inside the caller's transaction, consumeAll() kills whatever
+  // else is outstanding. Every failure is a plain null — the caller decides
+  // how (uniformly) to report it, so nothing here leaks *why* a token was
+  // rejected.
 
-  /** A live (unconsumed, unexpired) link token's row, or null. Does not consume. */
+  /** A live (unconsumed, unexpired) token's row, or null. Does not consume. */
   async findLiveToken(
     purpose: OtpPurpose,
     token: string,
@@ -106,33 +106,7 @@ export class OtpService {
   }
 
   /**
-   * The user's latest live numeric code's row if `code` matches, else null.
-   * Does not consume; a wrong guess still counts toward the attempt limit.
-   */
-  async findLiveCode(
-    userId: string,
-    purpose: OtpPurpose,
-    code: string,
-  ): Promise<{ id: string } | null> {
-    const otp = await this.prisma.otpCode.findFirst({
-      where: { userId, purpose, consumedAt: null },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!otp || otp.attempts >= OTP_MAX_ATTEMPTS || otp.expiresAt < new Date()) {
-      return null;
-    }
-    if (otp.codeHash !== hashToken(code)) {
-      await this.prisma.otpCode.update({
-        where: { id: otp.id },
-        data: { attempts: { increment: 1 } },
-      });
-      return null;
-    }
-    return { id: otp.id };
-  }
-
-  /**
-   * Burns one credential. The `consumedAt: null` guard lives in the UPDATE
+   * Burns one token. The `consumedAt: null` guard lives in the UPDATE
    * itself, so when two requests race on the same link exactly one gets
    * `true` — the other's UPDATE matches no row.
    */
@@ -144,7 +118,7 @@ export class OtpService {
     return count === 1;
   }
 
-  /** Kills every still-outstanding credential of this purpose for the user. */
+  /** Kills every still-outstanding token of this purpose for the user. */
   async consumeAll(
     db: Prisma.TransactionClient,
     userId: string,

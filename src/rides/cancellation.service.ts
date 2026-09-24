@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DriverAvailability, RideOfferStatus, RideStatus } from '@prisma/client';
+import { DriverAvailability, RideOfferStatus, RideStatus, TariffServiceType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PricingService } from '../pricing/pricing.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -57,6 +57,7 @@ export class CancellationService {
       const tariff = await this.pricing.getActiveTariff(
         ride.vehicleType,
         ride.serviceAreaId ?? undefined,
+        TariffServiceType.RIDE,
       );
       const commissionRule = await this.pricing.getActiveCommissionRate('RIDE', ride.vehicleType);
       const commissionAmount = tariff.cancellationFee.mul(commissionRule.rate);

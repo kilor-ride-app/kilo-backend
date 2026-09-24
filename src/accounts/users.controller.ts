@@ -11,6 +11,7 @@ import {
   ParseFilePipe,
   Patch,
   Post,
+  Put,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -24,6 +25,7 @@ import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
 import { AuthService } from './auth.service';
 import { ChangeEmailDto } from './dto/change-email.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { NextOfKinDto } from './dto/next-of-kin.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { EmailVerificationService } from './email-verification.service';
@@ -60,6 +62,19 @@ export class UsersController {
   @Patch('me')
   updateMe(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateProfileDto) {
     return this.usersService.updateProfile(user.userId, dto);
+  }
+
+  // Emergency contact — the profile response carries nextOfKinName/Phone,
+  // so there is no separate GET.
+  @Put('me/next-of-kin')
+  setNextOfKin(@CurrentUser() user: AuthenticatedUser, @Body() dto: NextOfKinDto) {
+    return this.usersService.setNextOfKin(user.userId, dto.fullName, dto.phone);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Delete('me/next-of-kin')
+  clearNextOfKin(@CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.clearNextOfKin(user.userId);
   }
 
   @ApiConsumes('multipart/form-data')

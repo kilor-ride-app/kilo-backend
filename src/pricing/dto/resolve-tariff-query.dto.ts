@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsOptional, IsString, IsUUID } from 'class-validator';
+import { TariffServiceType } from '@prisma/client';
+import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class ResolveTariffQueryDto {
   @ApiProperty({ example: 'ECONOMY' })
@@ -10,4 +11,9 @@ export class ResolveTariffQueryDto {
   @IsOptional()
   @IsUUID()
   serviceAreaId?: string;
+
+  @ApiProperty({ required: false, enum: TariffServiceType })
+  @IsOptional()
+  @IsEnum(TariffServiceType)
+  serviceType?: TariffServiceType;
 }

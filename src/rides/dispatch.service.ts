@@ -6,12 +6,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  DeliveryStatus,
   DriverAvailability,
   DriverServiceMode,
   RideOfferStatus,
   RidePaymentMethod,
   RideStatus,
 } from '@prisma/client';
+import { NotificationCategory } from '../notifications/notification-categories';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -42,6 +45,7 @@ export class DispatchService {
     private readonly driverOffers: DriverOffersGateway,
     private readonly rideTracking: RideTrackingGateway,
     private readonly platformConfig: PlatformConfigService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private getMaxUnsettledCashRides(): Promise<number> {
@@ -84,7 +88,82 @@ export class DispatchService {
     });
     if (activeRide) {
       this.rideTracking.emitLocation(activeRide.id, { lat, lng });
+      return;
     }
+
+    // Same fan-out for a delivery the driver is currently carrying.
+    const activeDelivery = await this.prisma.delivery.findFirst({
+      where: {
+        driverId,
+        status: { in: [DeliveryStatus.ACCEPTED, DeliveryStatus.PICKED_UP] },
+      },
+      select: { id: true },
+    });
+    if (activeDelivery) {
+      this.rideTracking.emitDeliveryLocation(activeDelivery.id, { lat, lng });
+    }
+  }
+
+  // Last reported position, straight off the GEO set — null once the
+  // driver goes offline (setDriverStatus removes them from it).
+  async getDriverPosition(driverId: string): Promise<{ lat: number; lng: number } | null> {
+    const [pos] = await this.redis.client.geopos(GEO_KEY, driverId);
+    return pos ? { lng: Number(pos[0]), lat: Number(pos[1]) } : null;
+  }
+
+  // Distance (km) to the nearest online driver who could take each vehicle
+  // type — feeds the "arrives in ~4 min" pickup ETA on quotes. One GEO
+  // search and one status query regardless of how many vehicle types are
+  // asked about. A driver with no vehicleType on file can serve any type,
+  // matching findNearbyDrivers below. Absent key = nobody nearby.
+  async nearestDriverDistances(
+    lat: number,
+    lng: number,
+    vehicleTypes: string[],
+    serviceMode: DriverServiceMode,
+  ): Promise<Map<string, number>> {
+    const results = (await this.redis.client.geosearch(
+      GEO_KEY,
+      'FROMLONLAT',
+      lng,
+      lat,
+      'BYRADIUS',
+      SEARCH_RADIUS_KM,
+      'km',
+      'ASC',
+      'COUNT',
+      50,
+      'WITHDIST',
+    )) as Array<[string, string]>;
+    if (results.length === 0) {
+      return new Map();
+    }
+
+    const statuses = await this.prisma.driverStatus.findMany({
+      where: {
+        userId: { in: results.map(([id]) => id) },
+        availability: DriverAvailability.ONLINE,
+        serviceMode,
+      },
+      select: { userId: true, vehicleType: true },
+    });
+    const vehicleOf = new Map(statuses.map((s) => [s.userId, s.vehicleType]));
+
+    const nearest = new Map<string, number>();
+    for (const [driverId, dist] of results) {
+      if (!vehicleOf.has(driverId)) continue; // offline or in the other service mode
+      const driverVehicle = vehicleOf.get(driverId);
+      for (const vehicleType of vehicleTypes) {
+        if (
+          !nearest.has(vehicleType) &&
+          (driverVehicle === null || driverVehicle === vehicleType)
+        ) {
+          nearest.set(vehicleType, Number(dist)); // results are ASC, so first hit is nearest
+        }
+      }
+      if (nearest.size === vehicleTypes.length) break;
+    }
+    return nearest;
   }
 
   async startDispatch(rideId: string) {
@@ -207,6 +286,13 @@ export class DispatchService {
     for (const other of otherOffers) {
       this.driverOffers.emitOfferTaken(other.driverId, rideId);
     }
+    this.notifications.notify(
+      ride.riderId,
+      NotificationCategory.TRIPS,
+      'Your ride is on the way',
+      `${driver.firstName} is on the way to your pickup location.`,
+      { rideId },
+    );
 
     return ride;
   }

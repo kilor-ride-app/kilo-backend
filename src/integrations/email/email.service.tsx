@@ -5,6 +5,7 @@ import { BusinessTeamInviteEmail } from './templates/business-team-invite-email'
 import { GuarantorInviteEmail } from './templates/guarantor-invite-email';
 import { PasswordResetLinkEmail } from './templates/password-reset-link-email';
 import { StaffInviteEmail } from './templates/staff-invite-email';
+import { TripReceiptEmail, TripReceiptLine } from './templates/trip-receipt-email';
 import { VerificationCodeEmail } from './templates/verification-code-email';
 
 const RESEND_SEND_URL = 'https://api.resend.com/emails';
@@ -20,6 +21,7 @@ const FROM = {
   invite: 'Kilo Team <invites@mail.kilo.ng>',
   guarantor: 'Kilo <noreply@mail.kilo.ng>',
   reports: 'Kilo Reports <reports@mail.kilo.ng>',
+  receipts: 'Kilo Receipts <receipts@mail.kilo.ng>',
 } as const;
 
 @Injectable()
@@ -89,6 +91,21 @@ export class EmailService {
       />,
     );
     await this.dispatch(FROM.guarantor, to, `${driverName} has listed you as a guarantor`, html);
+  }
+
+  async sendTripReceipt(
+    to: string,
+    receipt: {
+      riderFirstName: string;
+      reference: string;
+      pickupAddress: string;
+      dropoffAddress: string;
+      completedAt: string;
+      lines: TripReceiptLine[];
+    },
+  ): Promise<void> {
+    const html = await render(<TripReceiptEmail {...receipt} />);
+    await this.dispatch(FROM.receipts, to, `Your Kilo trip receipt — ${receipt.reference}`, html);
   }
 
   // Used by ReportsProcessor to deliver a scheduled report — attachment

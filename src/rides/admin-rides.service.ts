@@ -22,7 +22,7 @@ const ACTIVE_RIDE_STATUSES: RideStatus[] = [
 ];
 
 const PARTY_SELECT = {
-  select: { id: true, firstName: true, lastName: true, phone: true },
+  select: { id: true, publicId: true, firstName: true, lastName: true, phone: true },
 } as const;
 
 const RIDE_LIST_SELECT = {
@@ -69,6 +69,7 @@ export class AdminRidesService {
         ? {
             OR: [
               { id: { startsWith: search } },
+              { publicId: nameContains },
               { rider: { firstName: nameContains } },
               { rider: { lastName: nameContains } },
               { driver: { firstName: nameContains } },
@@ -223,7 +224,14 @@ export class AdminRidesService {
       ride.transactionId
         ? this.prisma.transaction.findUnique({
             where: { id: ride.transactionId },
-            select: { id: true, type: true, status: true, amount: true, reference: true },
+            select: {
+              id: true,
+              publicId: true,
+              type: true,
+              status: true,
+              amount: true,
+              reference: true,
+            },
           })
         : null,
       ride.driverId

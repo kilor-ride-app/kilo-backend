@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma, UserRole, UserStatus } from '@prisma/client';
+import { PreferredLanguage, Prisma, UserRole, UserStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { R2Service } from '../integrations/r2/r2.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { toE164 } from '../common/utils/phone.util';
 import { StaffStatusFilter } from './dto/list-staff-query.dto';
 import { UpdateStaffDto } from './dto/update-staff.dto';
 
@@ -12,6 +13,7 @@ const ONE_WEEK_SECONDS = 7 * 24 * 60 * 60;
 
 const PUBLIC_USER_SELECT = {
   id: true,
+  publicId: true,
   firstName: true,
   lastName: true,
   email: true,
@@ -21,6 +23,9 @@ const PUBLIC_USER_SELECT = {
   role: true,
   status: true,
   profilePhotoUrl: true,
+  preferredLanguage: true,
+  nextOfKinName: true,
+  nextOfKinPhone: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.UserSelect;
@@ -83,11 +88,32 @@ export class UsersService {
 
   async updateProfile(
     userId: string,
-    data: { firstName?: string; lastName?: string; profilePhotoUrl?: string },
+    data: {
+      firstName?: string;
+      lastName?: string;
+      profilePhotoUrl?: string;
+      preferredLanguage?: PreferredLanguage;
+    },
   ) {
     return this.prisma.user.update({
       where: { id: userId },
       data,
+      select: PUBLIC_USER_SELECT,
+    });
+  }
+
+  async setNextOfKin(userId: string, fullName: string, phone: string) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { nextOfKinName: fullName.trim(), nextOfKinPhone: toE164(phone) },
+      select: PUBLIC_USER_SELECT,
+    });
+  }
+
+  async clearNextOfKin(userId: string) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { nextOfKinName: null, nextOfKinPhone: null },
       select: PUBLIC_USER_SELECT,
     });
   }

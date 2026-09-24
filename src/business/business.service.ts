@@ -132,6 +132,7 @@ export class BusinessService {
       where: { businessId },
       select: {
         id: true,
+        publicId: true,
         firstName: true,
         lastName: true,
         email: true,
@@ -234,6 +235,7 @@ export class BusinessService {
       ...(query.search
         ? {
             OR: [
+              { publicId: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
               { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
               { contactEmail: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
             ],
@@ -455,6 +457,7 @@ export class BusinessService {
         take: 10,
         select: {
           id: true,
+          publicId: true,
           status: true,
           pickupAddress: true,
           receiverName: true,

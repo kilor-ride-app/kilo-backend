@@ -17,8 +17,15 @@ import { generateSecureToken, hashToken } from '../common/utils/token.util';
 import { describeUserAgent } from '../common/utils/user-agent.util';
 import { RequestContext } from '../common/types/jwt-payload.interface';
 import { EmailVerificationService } from './email-verification.service';
-import { OtpService } from './otp.service';
+import { OtpService, RESET_TOKEN_TTL_MS } from './otp.service';
 import { OtpPurpose } from './types/otp-purpose.enum';
+
+// One failure for every way a reset token can be wrong (unknown, expired,
+// already used, social-only account) — so the reset route can't be used to
+// probe for accounts or reset state.
+function invalidResetCredential() {
+  return new UnauthorizedException('Invalid or expired reset link — request a new one');
+}
 
 export interface TokenPair {
   accessToken: string;
@@ -37,13 +44,7 @@ export class AuthService {
     private readonly emailVerification: EmailVerificationService,
   ) {}
 
-  async registerRider(dto: {
-    firstName: string;
-    lastName: string;
-    phone: string;
-    email?: string;
-    password: string;
-  }) {
+  async registerRider(dto: { firstName: string; lastName: string; phone: string; email?: string }) {
     return this.register(dto, UserRole.RIDER);
   }
 
@@ -63,7 +64,8 @@ export class AuthService {
       lastName: string;
       phone: string;
       email?: string;
-      password: string;
+      // Omitted for riders, who authenticate with phone OTP only.
+      password?: string;
     },
     role: UserRole,
   ) {
@@ -76,7 +78,7 @@ export class AuthService {
       throw new ConflictException('An account with this phone or email already exists');
     }
 
-    const passwordHash = await argon2.hash(dto.password);
+    const passwordHash = dto.password ? await argon2.hash(dto.password) : null;
     const user = await this.prisma.user.create({
       data: {
         firstName: dto.firstName,
@@ -222,6 +224,9 @@ export class AuthService {
       : this.prisma.user.findUnique({ where: { phone: identifier } });
   }
 
+  // Step 1 of 2: request a reset link. The link carries a single-use token
+  // and opens the frontend's reset page, which submits it together with the
+  // new password to resetPassword (step 2).
   async forgotPassword(identifier: string) {
     const genericMessage = {
       message: 'If the account exists, a password reset link has been sent',
@@ -235,53 +240,45 @@ export class AuthService {
       return genericMessage;
     }
 
-    // Prefer a reset link by email — it costs nothing next to an SMS and
-    // needs no code re-typing. Fall back to an SMS code only when there's
-    // no verified address to send a link to (phone-only accounts, or an
-    // email that was never confirmed).
+    const token = await this.otp.generateAndStoreToken(user.id, OtpPurpose.PASSWORD_RESET);
+    const baseUrl = (this.config.get<string>('RESET_APP_URL') ?? 'http://localhost:5173').replace(
+      /\/+$/,
+      '',
+    );
+    const resetUrl = `${baseUrl}/reset-password?token=${token}`;
+    const expiresInMinutes = RESET_TOKEN_TTL_MS / 60_000;
+
+    // The link goes to the account's email when there's a verified address.
+    // Phone-only accounts (and an email that was never confirmed) get the
+    // same link by SMS instead — nobody is locked out, and the link is never
+    // sent to an address nobody has proven they own.
     if (user.email && user.emailVerifiedAt) {
-      const token = await this.otp.generateAndStoreToken(user.id, OtpPurpose.PASSWORD_RESET);
-      const resetUrl = `${this.config.get<string>('RESET_APP_URL') ?? 'http://localhost:5173'}/reset-password?token=${token}`;
-      await this.email.sendPasswordResetLink(user.email, resetUrl);
+      await this.email.sendPasswordResetLink(user.email, resetUrl, expiresInMinutes);
     } else {
-      const code = await this.otp.generateAndStore(user.id, OtpPurpose.PASSWORD_RESET);
-      await this.sms.sendOtp(user.phone, code);
+      await this.sms.sendMessage(
+        user.phone,
+        `Reset your Kilo password: ${resetUrl} — this link expires in ${expiresInMinutes} minutes. If you didn't ask for this, ignore this message.`,
+      );
     }
     return genericMessage;
   }
 
-  // Mirrors forgotPassword's stance: whatever is wrong with the link/code
-  // (unknown account, social-only account, nothing pending, wrong, expired,
-  // already used, too many attempts) the caller gets the SAME response, so
-  // this route can't be used to probe which accounts exist or have a reset
-  // in flight.
-  async resetPassword(dto: {
-    token?: string;
-    identifier?: string;
-    code?: string;
-    newPassword: string;
-  }) {
-    if (!dto.token && !(dto.identifier && dto.code)) {
-      throw new BadRequestException('Provide either a reset token or an identifier and code');
-    }
-    const invalid = () =>
-      new UnauthorizedException('Invalid or expired reset link or code — request a new one');
+  // Step 2 of 2: the reset page posts the `token` from the link plus the new
+  // password.
+  //
+  // Mirrors forgotPassword's stance: whatever is wrong with the token
+  // (unknown, expired, already used, social-only account) the caller gets the
+  // SAME response, so this route can't be used to probe which accounts exist
+  // or have a reset in flight.
+  async resetPassword(dto: { token: string; newPassword: string }) {
+    const invalid = invalidResetCredential;
 
     // Hash before looking anything up: the slow step runs for every request,
-    // so response time doesn't reveal whether the account exists.
+    // so response time doesn't reveal whether the token is real.
     const passwordHash = await argon2.hash(dto.newPassword);
 
-    // Check the credential WITHOUT burning it yet.
-    let found: { id: string; userId: string } | null = null;
-    if (dto.token) {
-      found = await this.otp.findLiveToken(OtpPurpose.PASSWORD_RESET, dto.token);
-    } else {
-      const account = await this.findByIdentifier(dto.identifier!);
-      const live = account
-        ? await this.otp.findLiveCode(account.id, OtpPurpose.PASSWORD_RESET, dto.code!)
-        : null;
-      found = account && live ? { id: live.id, userId: account.id } : null;
-    }
+    // Check the token WITHOUT burning it yet.
+    const found = await this.otp.findLiveToken(OtpPurpose.PASSWORD_RESET, dto.token);
     if (!found) {
       throw invalid();
     }
@@ -296,14 +293,14 @@ export class AuthService {
       throw invalid();
     }
 
-    // Burn the credential, set the password and revoke sessions as ONE unit:
+    // Burn the token, set the password and revoke sessions as ONE unit:
     // claim() is atomic, so a link used twice at once works exactly once,
     // and if saving fails the claim rolls back — the user's link survives
     // for a retry instead of being burned by a transient error.
-    const credentialId = found.id;
+    const tokenId = found.id;
     const userId = found.userId;
     await this.prisma.$transaction(async (tx) => {
-      if (!(await this.otp.claim(tx, credentialId))) {
+      if (!(await this.otp.claim(tx, tokenId))) {
         throw invalid();
       }
       await tx.user.update({ where: { id: userId }, data: { passwordHash } });
@@ -313,8 +310,8 @@ export class AuthService {
         where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
-      // ...and every other reset link/code still in flight, so an older
-      // email in the inbox can't be used to change the password again.
+      // ...and every other reset link still in flight, so an older email in
+      // the inbox can't be used to change the password again.
       await this.otp.consumeAll(tx, userId, OtpPurpose.PASSWORD_RESET);
     });
 

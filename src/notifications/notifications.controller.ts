@@ -32,6 +32,18 @@ export class NotificationsController {
     return this.notifications.listNotifications(user.userId, query.take, query.skip);
   }
 
+  // Bell badge on the home screen.
+  @Get('notifications/unread-count')
+  unreadCount(@CurrentUser() user: AuthenticatedUser) {
+    return this.notifications.unreadCount(user.userId);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Delete('notifications/:id')
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.notifications.deleteNotification(user.userId, id);
+  }
+
   @HttpCode(HttpStatus.OK)
   @Post('notifications/:id/read')
   markRead(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {

@@ -7,13 +7,17 @@ import {
 import {
   DeliveryStatus,
   DriverAvailability,
+  Prisma,
   ProofOfDeliveryType,
   RidePaymentMethod,
 } from '@prisma/client';
 import { hashToken } from '../common/utils/token.util';
 import { R2Service } from '../integrations/r2/r2.service';
-import { PricingService } from '../pricing/pricing.service';
+import { PricingService, roundMoney } from '../pricing/pricing.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RideTrackingGateway } from '../rides/gateways/ride-tracking.gateway';
+import { NotificationCategory } from '../notifications/notification-categories';
+import { NotificationsService } from '../notifications/notifications.service';
 import { WalletService } from '../wallet/wallet.service';
 
 const INVOICE_DUE_MS = 14 * 24 * 60 * 60 * 1000; // net-14
@@ -25,7 +29,15 @@ export class LogisticsTripService {
     private readonly pricing: PricingService,
     private readonly wallet: WalletService,
     private readonly r2: R2Service,
+    private readonly tracking: RideTrackingGateway,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  // Driver reached the pickup point — a timeline milestone only; the
+  // status stays ACCEPTED until the package is actually collected.
+  async markArrivedAtPickup(driverId: string, deliveryId: string) {
+    return this.recordMilestone(driverId, deliveryId, DeliveryStatus.ACCEPTED, 'arrivedAtPickupAt');
+  }
 
   async confirmPickup(driverId: string, deliveryId: string) {
     const delivery = await this.transitionAsDriver(
@@ -35,7 +47,18 @@ export class LogisticsTripService {
       DeliveryStatus.PICKED_UP,
       { pickedUpAt: new Date() },
     );
+    this.tracking.emitDeliveryStatus(deliveryId, { status: DeliveryStatus.PICKED_UP });
     return delivery;
+  }
+
+  // Driver reached the drop-off ("Arrived" on the sender's timeline).
+  async markArrivedAtDropoff(driverId: string, deliveryId: string) {
+    return this.recordMilestone(
+      driverId,
+      deliveryId,
+      DeliveryStatus.PICKED_UP,
+      'arrivedAtDropoffAt',
+    );
   }
 
   async submitProofOfDelivery(
@@ -65,7 +88,12 @@ export class LogisticsTripService {
       ) {
         throw new BadRequestException('Invalid delivery code');
       }
-      return this.prisma.delivery.update({ where: { id: deliveryId }, data: { podType: type } });
+      const updated = await this.prisma.delivery.update({
+        where: { id: deliveryId },
+        data: { podType: type, podSubmittedAt: new Date() },
+      });
+      this.tracking.emitDeliveryStatus(deliveryId, { status: 'DELIVERED' });
+      return updated;
     }
 
     if (!options.file) {
@@ -74,10 +102,12 @@ export class LogisticsTripService {
     const fileKey = `pod/${deliveryId}/${type}/${Date.now()}-${options.file.originalname}`;
     await this.r2.uploadObject(fileKey, options.file.buffer, options.file.mimetype);
 
-    return this.prisma.delivery.update({
+    const updated = await this.prisma.delivery.update({
       where: { id: deliveryId },
-      data: { podType: type, podFileKey: fileKey },
+      data: { podType: type, podFileKey: fileKey, podSubmittedAt: new Date() },
     });
+    this.tracking.emitDeliveryStatus(deliveryId, { status: 'DELIVERED' });
+    return updated;
   }
 
   async completeDelivery(driverId: string, deliveryId: string) {
@@ -98,11 +128,13 @@ export class LogisticsTripService {
     // MVP simplification: final fare is the original estimate, not
     // recomputed from actual GPS trace — mirrors TripService.completeTrip.
     const finalFare = delivery.estimatedFare!;
+    // As with rides, tax passes through and is never commissioned.
+    const taxAmount = delivery.taxAmount ?? new Prisma.Decimal(0);
     const commissionRule = await this.pricing.getActiveCommissionRate(
       'DELIVERY',
       delivery.vehicleType,
     );
-    const commissionAmount = finalFare.mul(commissionRule.rate);
+    const commissionAmount = roundMoney(finalFare.minus(taxAmount).mul(commissionRule.rate));
 
     let transactionId: string | undefined;
     const reference = `delivery:${deliveryId}`;
@@ -130,13 +162,20 @@ export class LogisticsTripService {
         finalFare,
         commissionAmount,
         reference,
+        undefined,
+        taxAmount,
       );
       transactionId = tx.id;
     } else {
+      // Cash: the driver holds the tax too, so it's added to what they owe
+      // (see the matching note in TripService.completeTrip).
       await this.wallet.recordCashDeliveryCommission(
         driverId,
-        commissionAmount,
+        commissionAmount.plus(taxAmount),
         `${reference}:commission`,
+        taxAmount.greaterThan(0)
+          ? { commission: commissionAmount.toString(), tax: taxAmount.toString() }
+          : undefined,
       );
     }
 
@@ -161,8 +200,49 @@ export class LogisticsTripService {
       where: { userId: driverId },
       data: { availability: DriverAvailability.ONLINE },
     });
+    this.tracking.emitDeliveryStatus(deliveryId, {
+      status: DeliveryStatus.COMPLETED,
+      finalFare: finalFare.toString(),
+    });
+    this.notifications.notify(
+      delivery.senderId,
+      NotificationCategory.TRIPS,
+      'Delivery completed',
+      `Your package has been delivered to ${delivery.receiverName}.`,
+      { deliveryId },
+    );
 
     return completed;
+  }
+
+  private async recordMilestone(
+    driverId: string,
+    deliveryId: string,
+    requiredStatus: DeliveryStatus,
+    field: 'arrivedAtPickupAt' | 'arrivedAtDropoffAt',
+  ) {
+    const delivery = await this.prisma.delivery.findUnique({ where: { id: deliveryId } });
+    if (!delivery) {
+      throw new NotFoundException('Delivery not found');
+    }
+    if (delivery.driverId !== driverId) {
+      throw new ForbiddenException('You are not the driver on this delivery');
+    }
+    if (delivery.status !== requiredStatus) {
+      throw new BadRequestException(`Not possible while the delivery is ${delivery.status}`);
+    }
+    if (delivery[field]) {
+      return delivery; // already recorded — a repeated tap is harmless
+    }
+    const updated = await this.prisma.delivery.update({
+      where: { id: deliveryId },
+      data: { [field]: new Date() },
+    });
+    this.tracking.emitDeliveryStatus(deliveryId, {
+      status: delivery.status,
+      milestone: field === 'arrivedAtPickupAt' ? 'ARRIVED_AT_PICKUP' : 'ARRIVED_AT_DROPOFF',
+    });
+    return updated;
   }
 
   private async transitionAsDriver(

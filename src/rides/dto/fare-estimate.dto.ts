@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsLatitude, IsLongitude, IsString } from 'class-validator';
+import { IsLatitude, IsLongitude, IsOptional, IsString } from 'class-validator';
 
 export class FareEstimateDto {
   @ApiProperty({ example: 6.5244 })
@@ -18,7 +18,21 @@ export class FareEstimateDto {
   @IsLongitude()
   dropoffLng: number;
 
-  @ApiProperty({ example: 'ECONOMY' })
+  @ApiProperty({
+    required: false,
+    example: 'ECONOMY',
+    description: 'Omit to get every ride option for the route (the vehicle picker)',
+  })
+  @IsOptional()
   @IsString()
-  vehicleType: string;
+  vehicleType?: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'KILO50',
+    description: 'Applied only when the request carries a valid access token',
+  })
+  @IsOptional()
+  @IsString()
+  promoCode?: string;
 }

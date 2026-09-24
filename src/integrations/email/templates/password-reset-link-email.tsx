@@ -7,7 +7,10 @@ interface PasswordResetLinkEmailProps {
   expiresInMinutes: number;
 }
 
-export function PasswordResetLinkEmail({ resetUrl, expiresInMinutes }: PasswordResetLinkEmailProps) {
+export function PasswordResetLinkEmail({
+  resetUrl,
+  expiresInMinutes,
+}: PasswordResetLinkEmailProps) {
   return (
     <EmailLayout previewText={`Reset your ${brand.name} password`}>
       <Text style={{ fontSize: 16, color: brand.textColor, margin: '0 0 20px' }}>

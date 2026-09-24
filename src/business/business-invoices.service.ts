@@ -1,22 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InvoiceStatus, RidePaymentMethod } from '@prisma/client';
+import { InvoiceStatus } from '@prisma/client';
+import { CreateDeliveryDto } from '../logistics/dto/create-delivery.dto';
 import { LogisticsService } from '../logistics/logistics.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { BusinessService } from './business.service';
 
-interface DeliveryScheduleItem {
-  pickupLat: number;
-  pickupLng: number;
-  pickupAddress: string;
-  packageDescription: string;
-  packageValue?: number;
-  receiverName: string;
-  receiverPhone: string;
-  vehicleType: string;
-  paymentMethod?: RidePaymentMethod; // ignored — business-billed deliveries never use WALLET/CASH
-  stops: { lat: number; lng: number; address: string }[];
-}
+// Same shape as an individual booking; paymentMethod is ignored —
+// business-billed deliveries are always BUSINESS_INVOICE.
+type DeliveryScheduleItem = CreateDeliveryDto;
 
 @Injectable()
 export class BusinessInvoicesService {
@@ -37,6 +29,7 @@ export class BusinessInvoicesService {
         pickupLng: item.pickupLng,
         stops: item.stops,
         vehicleType: item.vehicleType,
+        serviceType: item.serviceType,
       });
       const estimatedFare = quote.quotes[0]?.estimatedFare;
       if (!estimatedFare) {
@@ -88,6 +81,8 @@ export class BusinessInvoicesService {
       invoice.amount,
       invoice.commissionAmount,
       `invoice:${invoiceId}`,
+      undefined,
+      delivery.taxAmount ?? undefined,
     );
 
     return this.prisma.invoice.update({

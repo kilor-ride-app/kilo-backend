@@ -130,7 +130,7 @@ export class AdminFinanceService {
     const drivers = driverIds.length
       ? await this.prisma.user.findMany({
           where: { id: { in: driverIds } },
-          select: { id: true, firstName: true, lastName: true, phone: true },
+          select: { id: true, publicId: true, firstName: true, lastName: true, phone: true },
         })
       : [];
     const byId = new Map(drivers.map((d) => [d.id, d]));
@@ -151,7 +151,12 @@ export class AdminFinanceService {
       ...(query.status ? { status: query.status } : {}),
       ...(createdAt ? { createdAt } : {}),
       ...(query.search
-        ? { reference: { contains: query.search, mode: Prisma.QueryMode.insensitive } }
+        ? {
+            OR: [
+              { publicId: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+              { reference: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+            ],
+          }
         : {}),
     };
   }
@@ -205,7 +210,7 @@ export class AdminFinanceService {
       filters: describeFilters({
         Type: query.type,
         Status: query.status,
-        Reference: query.search,
+        Search: query.search,
       }),
       summary: [
         {

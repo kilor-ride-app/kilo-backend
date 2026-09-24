@@ -44,7 +44,11 @@ export class FleetPartnersService {
     await this.getDetail(fleetPartnerId);
     return this.prisma.fleetPartnerDriver.findMany({
       where: { fleetPartnerId },
-      include: { driver: { select: { id: true, firstName: true, lastName: true, phone: true } } },
+      include: {
+        driver: {
+          select: { id: true, publicId: true, firstName: true, lastName: true, phone: true },
+        },
+      },
     });
   }
 

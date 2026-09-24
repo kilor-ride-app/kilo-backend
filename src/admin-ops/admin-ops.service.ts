@@ -332,6 +332,7 @@ export class AdminOpsService {
       where: { status: { in: ACTIVE_RIDE_STATUSES } },
       select: {
         id: true,
+        publicId: true,
         status: true,
         driverId: true,
         pickupLat: true,
@@ -375,6 +376,7 @@ export class AdminOpsService {
           where: { status: { in: ACTIVE_RIDE_STATUSES } },
           select: {
             id: true,
+            publicId: true,
             status: true,
             driverId: true,
             riderId: true,
@@ -392,6 +394,7 @@ export class AdminOpsService {
           where: { status: { in: ACTIVE_DELIVERY_STATUSES } },
           select: {
             id: true,
+            publicId: true,
             status: true,
             driverId: true,
             packageDescription: true,
@@ -403,6 +406,7 @@ export class AdminOpsService {
           where: { isActive: true },
           select: {
             id: true,
+            publicId: true,
             name: true,
             lat: true,
             lng: true,
@@ -424,7 +428,7 @@ export class AdminOpsService {
     const users = namedIds.size
       ? await this.prisma.user.findMany({
           where: { id: { in: [...namedIds] } },
-          select: { id: true, firstName: true, lastName: true, phone: true },
+          select: { id: true, publicId: true, firstName: true, lastName: true, phone: true },
         })
       : [];
     const userById = new Map(users.map((u) => [u.id, u]));
@@ -761,6 +765,7 @@ export class AdminOpsService {
       ...(query.search
         ? {
             OR: [
+              { publicId: { contains: query.search, mode: 'insensitive' } },
               { firstName: { contains: query.search, mode: 'insensitive' } },
               { lastName: { contains: query.search, mode: 'insensitive' } },
               { email: { contains: query.search, mode: 'insensitive' } },
@@ -1132,7 +1137,14 @@ export class AdminOpsService {
       }),
       this.prisma.kycVerification.findMany({
         where: { driverId: id },
-        select: { id: true, type: true, status: true, verifiedAt: true, createdAt: true },
+        select: {
+          id: true,
+          publicId: true,
+          type: true,
+          status: true,
+          verifiedAt: true,
+          createdAt: true,
+        },
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.guarantor.findFirst({
@@ -1149,7 +1161,10 @@ export class AdminOpsService {
       }),
       this.prisma.fleetPartnerDriver.findUnique({
         where: { driverId: id },
-        select: { attachedAt: true, fleetPartner: { select: { id: true, name: true } } },
+        select: {
+          attachedAt: true,
+          fleetPartner: { select: { id: true, publicId: true, name: true } },
+        },
       }),
       this.prisma.deviceToken.aggregate({
         where: { userId: id },
@@ -1433,7 +1448,7 @@ export class AdminOpsService {
     const actors = actorIds.length
       ? await this.prisma.user.findMany({
           where: { id: { in: actorIds } },
-          select: { id: true, firstName: true, lastName: true, email: true },
+          select: { id: true, publicId: true, firstName: true, lastName: true, email: true },
         })
       : [];
     const actorName = new Map(actors.map((a) => [a.id, fullName(a) || a.email || a.id]));

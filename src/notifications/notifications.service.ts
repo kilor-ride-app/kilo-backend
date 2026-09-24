@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { NotificationChannel, Prisma, UserRole } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { toPaginated } from '../common/utils/paginate.util';
@@ -17,6 +17,8 @@ export const FANOUT_JOB = 'fanout';
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly fcm: FcmService,
@@ -66,6 +68,31 @@ export class NotificationsService {
       take,
       skip,
     });
+  }
+
+  // For trip/payment events: a failed push must never fail the ride or
+  // payment that triggered it, so this logs instead of throwing.
+  notify(
+    userId: string,
+    category: string,
+    title: string,
+    body: string,
+    metadata?: Prisma.InputJsonValue,
+  ): void {
+    this.send(userId, category, title, body, metadata).catch((err) =>
+      this.logger.warn(`Failed to notify user ${userId} (${title}): ${err}`),
+    );
+  }
+
+  async unreadCount(userId: string) {
+    return { unread: await this.prisma.notification.count({ where: { userId, readAt: null } }) };
+  }
+
+  async deleteNotification(userId: string, notificationId: string) {
+    const result = await this.prisma.notification.deleteMany({
+      where: { id: notificationId, userId },
+    });
+    return { deleted: result.count > 0 };
   }
 
   async markRead(userId: string, notificationId: string) {

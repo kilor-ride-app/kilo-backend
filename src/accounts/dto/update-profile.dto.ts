@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsOptional, IsString, IsUrl } from 'class-validator';
+import { PreferredLanguage } from '@prisma/client';
+import { IsEnum, IsOptional, IsString, IsUrl } from 'class-validator';
 
 export class UpdateProfileDto {
   @ApiProperty({ required: false })
@@ -16,4 +17,9 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsUrl()
   profilePhotoUrl?: string;
+
+  @ApiProperty({ required: false, enum: PreferredLanguage })
+  @IsOptional()
+  @IsEnum(PreferredLanguage)
+  preferredLanguage?: PreferredLanguage;
 }

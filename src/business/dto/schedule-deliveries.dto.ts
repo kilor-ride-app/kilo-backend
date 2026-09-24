@@ -5,8 +5,9 @@ import { CreateDeliveryDto } from '../../logistics/dto/create-delivery.dto';
 
 // Bulk booking, billed to the business's credit line — paymentMethod on
 // each item is ignored (business-billed deliveries never use WALLET/CASH).
-// Deliberately not a recurring-schedule engine: this creates every
-// delivery immediately, once. See PROGRESS.md for the scope note.
+// Deliberately not a recurring-schedule engine: every delivery is created
+// once, now — an item with scheduledFor is booked now and dispatched near
+// that time. See PROGRESS.md for the scope note.
 export class ScheduleDeliveriesDto {
   @ApiProperty({ type: [CreateDeliveryDto] })
   @IsArray()

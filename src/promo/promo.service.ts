@@ -17,6 +17,35 @@ interface ValidateResult {
 export class PromoService {
   constructor(private readonly prisma: PrismaService) {}
 
+  // Home-screen banner: live, featured promos, soonest-expiring first.
+  // Doesn't check per-user eligibility — tapping through goes via
+  // POST /promos/validate, which does.
+  async listFeatured() {
+    const now = new Date();
+    return this.prisma.promo.findMany({
+      where: {
+        isActive: true,
+        isFeatured: true,
+        validFrom: { lte: now },
+        validUntil: { gte: now },
+      },
+      select: {
+        id: true,
+        code: true,
+        title: true,
+        subtitle: true,
+        imageUrl: true,
+        type: true,
+        value: true,
+        maxDiscount: true,
+        applicableServices: true,
+        validUntil: true,
+      },
+      orderBy: { validUntil: 'asc' },
+      take: 10,
+    });
+  }
+
   // Pure computation + eligibility check — never records a redemption.
   // Called both by POST /promos/validate (a draft-booking preview with no
   // side effects) and internally by RidesService/LogisticsService right
@@ -105,6 +134,10 @@ export class PromoService {
     validFrom: string;
     validUntil: string;
     applicableServices: PromoApplicableService[];
+    isFeatured?: boolean;
+    title?: string;
+    subtitle?: string;
+    imageUrl?: string;
   }) {
     const existing = await this.prisma.promo.findUnique({
       where: { code: dto.code.toUpperCase() },
@@ -137,6 +170,10 @@ export class PromoService {
       validUntil: string;
       applicableServices: PromoApplicableService[];
       isActive: boolean;
+      isFeatured: boolean;
+      title: string;
+      subtitle: string;
+      imageUrl: string;
     }>,
   ) {
     await this.findPromoOrThrow(id);

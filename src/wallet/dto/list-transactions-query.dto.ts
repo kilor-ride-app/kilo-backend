@@ -15,7 +15,10 @@ export class ListTransactionsQueryDto extends DateRangeQueryDto {
   @IsEnum(TransactionStatus)
   status?: TransactionStatus;
 
-  @ApiProperty({ required: false, description: 'Matches the transaction reference' })
+  @ApiProperty({
+    required: false,
+    description: 'Matches the transaction public ID (TXN-…) or gateway reference',
+  })
   @IsOptional()
   @IsString()
   search?: string;

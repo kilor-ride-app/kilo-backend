@@ -148,6 +148,7 @@ async function cleanup() {
     ['supportTicket', byUserEmail],
     ['solarAssessment', { OR: [byUserEmail, { contactEmail: { endsWith: SD } }] }],
     ['driverStatus', byUserEmail],
+    ['driverVehicle', byDriverEmail],
     ['tariff', { serviceArea: { name: { startsWith: '[SEED] ' } } }],
     ['commissionRule', { vehicleType: { startsWith: 'SEED-' } }],
     ['serviceArea', { name: { startsWith: '[SEED] ' } }],
@@ -183,6 +184,32 @@ const past = (days) => recentDate(days);
 
 const RIDE_VEHICLES = ['ECONOMY', 'COMFORT', 'XL', 'BIKE', 'KEKE'];
 const CARGO_VEHICLES = ['BIKE', 'VAN', 'TRUCK'];
+const FREIGHT_VEHICLES = ['VAN', 'TRUCK'];
+
+// What the mobile vehicle pickers list, per service (mirrors the design:
+// Standard/Keke/Comfort for rides, Bike/Tricycle/Car for packages,
+// Van/Truck for freight).
+const TARIFF_CATALOG = [
+  { serviceType: 'RIDE', vehicleType: 'ECONOMY', displayName: 'Standard', description: 'Affordable everyday rides', sortOrder: 0, durationMultiplier: 1 },
+  { serviceType: 'RIDE', vehicleType: 'KEKE', displayName: 'Keke', description: 'Quick, short hops', sortOrder: 1, durationMultiplier: 0.9 },
+  { serviceType: 'RIDE', vehicleType: 'COMFORT', displayName: 'Comfort', description: 'Newer cars, more legroom', sortOrder: 2, durationMultiplier: 1 },
+  { serviceType: 'RIDE', vehicleType: 'XL', displayName: 'XL', description: 'Up to 6 seats', sortOrder: 3, durationMultiplier: 1 },
+  { serviceType: 'PACKAGE', vehicleType: 'BIKE', displayName: 'Bike', description: 'Best for light, small packages', sortOrder: 0, durationMultiplier: 0.8 },
+  { serviceType: 'PACKAGE', vehicleType: 'TRICYCLE', displayName: 'Tricycle', description: 'Good for large packages', sortOrder: 1, durationMultiplier: 1 },
+  { serviceType: 'PACKAGE', vehicleType: 'CAR', displayName: 'Car', description: 'Boxed or multiple items', sortOrder: 2, durationMultiplier: 1.2 },
+  { serviceType: 'FREIGHT', vehicleType: 'VAN', displayName: 'Van', description: 'Best for large packages', sortOrder: 0, durationMultiplier: 1.3 },
+  { serviceType: 'FREIGHT', vehicleType: 'TRUCK', displayName: 'Truck', description: 'Bulk and heavy loads', sortOrder: 1, durationMultiplier: 1.5 },
+];
+
+const VEHICLE_MODELS = [
+  ['Toyota', 'Camry'],
+  ['Honda', 'CR-V'],
+  ['Toyota', 'Corolla'],
+  ['Kia', 'Rio'],
+  ['Bajaj', 'RE Tricycle'],
+  ['Honda', 'Ace 125'],
+];
+const VEHICLE_COLORS = ['Silver', 'Black', 'White', 'Blue', 'Grey', 'Red'];
 
 async function main() {
   const args = process.argv.slice(2);
@@ -309,9 +336,16 @@ async function main() {
   // ── Tariffs ───────────────────────────────────────────────────────────
   console.log('Seeding tariffs…');
   for (const i of range(N)) {
+    const { serviceType, vehicleType, displayName, description, sortOrder, durationMultiplier } =
+      pick(TARIFF_CATALOG, i);
     await prisma.tariff.create({
       data: {
-        vehicleType: pick(RIDE_VEHICLES, i),
+        vehicleType,
+        serviceType,
+        displayName,
+        description,
+        sortOrder,
+        durationMultiplier,
         serviceAreaId: areas[i].id,
         baseFare: money(300, 1200),
         perKmRate: money(80, 250),
@@ -355,6 +389,24 @@ async function main() {
     });
   }
   note('driverStatus', N);
+
+  // ── Driver vehicles ───────────────────────────────────────────────────
+  console.log('Seeding driver vehicles…');
+  for (const i of range(N)) {
+    const [make, model] = pick(VEHICLE_MODELS, i);
+    await prisma.driverVehicle.create({
+      data: {
+        driverId: drivers[i].id,
+        make,
+        model,
+        color: pick(VEHICLE_COLORS, i),
+        // "SD" prefix keeps seeded plates clear of real ones.
+        plateNumber: `SD ${String(100 + i).padStart(3, '0')} KJ`,
+        year: int(2012, 2024),
+      },
+    });
+  }
+  note('driverVehicle', N);
 
   // ── KYC ───────────────────────────────────────────────────────────────
   console.log('Seeding KYC…');
@@ -554,6 +606,10 @@ async function main() {
           businessId: businessBilled ? businesses[i].id : null,
           status,
           vehicleType: pick(CARGO_VEHICLES, i),
+          serviceType: FREIGHT_VEHICLES.includes(pick(CARGO_VEHICLES, i)) ? 'FREIGHT' : 'PACKAGE',
+          isFragile: i % 4 === 0,
+          weightKg: money(0.5, 40),
+          packageSize: pick(['SMALL', 'MEDIUM', 'LARGE'], i),
           paymentMethod: businessBilled ? 'WALLET' : i % 3 === 0 ? 'CASH' : 'WALLET',
           pickupLat: lagosLat(),
           pickupLng: lagosLng(),

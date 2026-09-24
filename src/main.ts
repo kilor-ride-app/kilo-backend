@@ -35,7 +35,12 @@ async function bootstrap() {
     // Public receiver-tracking endpoints (LogisticsModule) stay unprefixed —
     // both routes need listing explicitly, NestJS's prefix exclusion
     // matches route patterns exactly, not as a path prefix.
-    exclude: ['health', 'track/:trackingToken', 'track/:trackingToken/otp/verify'],
+    exclude: [
+      'health',
+      'track/:trackingToken',
+      'track/:trackingToken/otp/verify',
+      'track/ride/:shareToken',
+    ],
   });
 
   // Swagger/OpenAPI — generated from controller/DTO decorators, so it

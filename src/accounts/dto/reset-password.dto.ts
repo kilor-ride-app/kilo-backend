@@ -1,27 +1,15 @@
-import { ApiPropertyOptional, ApiProperty } from '@nestjs/swagger';
-import { IsString, Matches, MinLength, ValidateIf } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class ResetPasswordDto {
-  @ApiPropertyOptional({
-    example: 'a1b2c3...',
-    description: 'Token from the reset-password link emailed to the account — mutually exclusive with identifier/code',
+  @ApiProperty({
+    example: 'a1b2c3…',
+    description:
+      "The token from the reset link sent to the account (email, or SMS for phone-only accounts) — the reset page reads it from the link's ?token= query parameter",
   })
-  @ValidateIf((o) => !o.identifier)
   @IsString()
-  token?: string;
-
-  @ApiPropertyOptional({
-    example: '+2348012345678',
-    description: 'Phone or email, for the SMS-code fallback path (phone-only accounts) — used with `code`',
-  })
-  @ValidateIf((o) => !o.token)
-  @IsString()
-  identifier?: string;
-
-  @ApiPropertyOptional({ example: '123456' })
-  @ValidateIf((o) => !o.token)
-  @Matches(/^\d{6}$/, { message: 'code must be a 6-digit numeric string' })
-  code?: string;
+  @IsNotEmpty()
+  token: string;
 
   @ApiProperty({ minLength: 8, example: 'a-new-strong-password' })
   @IsString()

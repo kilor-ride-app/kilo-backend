@@ -16,6 +16,10 @@ function rideRoom(rideId: string): string {
   return `ride:${rideId}`;
 }
 
+function deliveryRoom(deliveryId: string): string {
+  return `delivery:${deliveryId}`;
+}
+
 // Fixed namespace, per-ride rooms — same reasoning as DriverOffersGateway.
 // Unlike that gateway, membership here isn't derivable purely from the
 // authenticated identity (a rider has many rides), so the client explicitly
@@ -60,6 +64,36 @@ export class RideTrackingGateway implements OnGatewayConnection {
 
     await client.join(rideRoom(body.rideId));
     return { subscribed: body.rideId };
+  }
+
+  // Package tracking: the sender (or the assigned driver) follows a
+  // delivery the same way a rider follows a ride. Same namespace and
+  // connection, separate room, same participant check.
+  @SubscribeMessage('subscribe:delivery')
+  async handleSubscribeDelivery(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { deliveryId: string },
+  ) {
+    const userId: string | undefined = client.data.userId;
+    if (!userId || !body?.deliveryId) {
+      return { error: 'Not authenticated or missing deliveryId' };
+    }
+
+    const delivery = await this.prisma.delivery.findUnique({ where: { id: body.deliveryId } });
+    if (!delivery || (delivery.senderId !== userId && delivery.driverId !== userId)) {
+      return { error: 'Not a participant on this delivery' };
+    }
+
+    await client.join(deliveryRoom(body.deliveryId));
+    return { subscribed: body.deliveryId };
+  }
+
+  emitDeliveryLocation(deliveryId: string, location: { lat: number; lng: number }) {
+    this.server.to(deliveryRoom(deliveryId)).emit('delivery:location', location);
+  }
+
+  emitDeliveryStatus(deliveryId: string, status: Record<string, unknown>) {
+    this.server.to(deliveryRoom(deliveryId)).emit('delivery:status', status);
   }
 
   emitLocation(rideId: string, location: { lat: number; lng: number }) {

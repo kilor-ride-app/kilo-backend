@@ -59,6 +59,7 @@
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.3",
     "jwks-rsa": "^4.1.0",
+    "libphonenumber-js": "^1.13.12",
     "opossum": "^8.1.4",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",

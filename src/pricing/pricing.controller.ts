@@ -13,6 +13,6 @@ export class PricingController {
 
   @Get('tariffs/active')
   getActiveTariff(@Query() query: ResolveTariffQueryDto) {
-    return this.pricing.getActiveTariff(query.vehicleType, query.serviceAreaId);
+    return this.pricing.getActiveTariff(query.vehicleType, query.serviceAreaId, query.serviceType);
   }
 }

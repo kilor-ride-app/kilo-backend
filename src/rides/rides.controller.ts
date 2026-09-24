@@ -14,6 +14,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../common/guards/optional-jwt-auth.guard';
 import { AuthenticatedUser } from '../common/types/jwt-payload.interface';
 import { CancellationService } from './cancellation.service';
 import { CancelRideDto } from './dto/cancel-ride.dto';
@@ -34,10 +35,13 @@ export class RidesController {
   ) {}
 
   // Public — checking "how much would this cost" shouldn't require login.
+  // A token is still read when present, so a signed-in rider's promo code
+  // can be priced in.
+  @UseGuards(OptionalJwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('fare-estimate')
-  fareEstimate(@Body() dto: FareEstimateDto) {
-    return this.rides.estimateFare(dto);
+  fareEstimate(@CurrentUser() user: AuthenticatedUser | null, @Body() dto: FareEstimateDto) {
+    return this.rides.estimateFare(dto, user?.userId);
   }
 
   @ApiBearerAuth('access-token')
@@ -58,6 +62,14 @@ export class RidesController {
     return this.rides.listRides(user.userId, role, query.take, query.skip);
   }
 
+  // Static segment — must stay above `:id`.
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @Get('reviews')
+  async listMyReviews(@CurrentUser() user: AuthenticatedUser, @Query() query: PaginationDto) {
+    return this.rides.listMyReviews(user.userId, query.take, query.skip);
+  }
+
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard)
   @Get(':id')
@@ -75,6 +87,14 @@ export class RidesController {
     @Body() dto: RateRideDto,
   ) {
     return this.rides.rateRide(user.userId, id, dto.rating, dto.comment);
+  }
+
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post(':id/share')
+  async share(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.rides.shareRide(user.userId, id);
   }
 
   @ApiBearerAuth('access-token')

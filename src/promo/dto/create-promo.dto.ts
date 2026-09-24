@@ -4,12 +4,15 @@ import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsInt,
   IsISO8601,
   IsOptional,
   IsPositive,
   IsString,
+  IsUrl,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -63,4 +66,30 @@ export class CreatePromoDto {
   @ArrayMinSize(1)
   @IsEnum(PromoApplicableService, { each: true })
   applicableServices: PromoApplicableService[];
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description: 'Show as the home-screen banner (GET /promos/featured)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isFeatured?: boolean;
+
+  @ApiProperty({ required: false, example: '50% off your first 3 rides' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  title?: string;
+
+  @ApiProperty({ required: false, example: 'Use code KILO50' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  subtitle?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsUrl()
+  imageUrl?: string;
 }
